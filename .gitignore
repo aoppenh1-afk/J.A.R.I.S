@@ -1,0 +1,29 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# macOS
+.DS_Store
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local.json
+client_secret*.json
+
+# Python test cache
+.pytest_cache/
+.pytest-cache/
+
+# Runtime and release artifacts
+logs/
+run/
+coverage/
+dist/

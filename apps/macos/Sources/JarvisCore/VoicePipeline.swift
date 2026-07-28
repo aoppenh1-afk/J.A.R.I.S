@@ -1,0 +1,455 @@
+import Foundation
+
+public actor VoicePipeline {
+    public typealias SnapshotHandler = @Sendable (VoiceSnapshot) async -> Void
+
+    private let recognizer: any SpeechRecognizing
+    private let hermes: any HermesServicing
+    private let synthesizer: any SpeechSynthesizing
+    private let onSnapshot: SnapshotHandler
+    private let conversationTimeout: TimeInterval
+    private let uptime: @Sendable () -> TimeInterval
+    private var sessionID: String
+    private var lastPromptUptime: TimeInterval?
+
+    private var gate = GenerationGate()
+    private var snapshot = VoiceSnapshot()
+    private var speechContextID: UUID?
+    private var speechContinuation: AsyncStream<String>.Continuation?
+    private var speechTask: Task<Void, Never>?
+
+    public init(
+        recognizer: any SpeechRecognizing,
+        hermes: any HermesServicing,
+        synthesizer: any SpeechSynthesizing,
+        sessionID: String = UUID().uuidString,
+        conversationTimeout: TimeInterval = 300,
+        uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        onSnapshot: @escaping SnapshotHandler
+    ) {
+        self.recognizer = recognizer
+        self.hermes = hermes
+        self.synthesizer = synthesizer
+        self.sessionID = sessionID
+        self.conversationTimeout = conversationTimeout
+        self.uptime = uptime
+        self.onSnapshot = onSnapshot
+    }
+
+    public func prepare() async {
+        do {
+            try await prepareOrThrow()
+        } catch {
+            await fail(error)
+        }
+    }
+
+    public func prepareOrThrow() async throws {
+        try await recognizer.prepare()
+        _ = try await hermes.capabilities()
+        await publish {
+            $0.state = .idle
+            $0.statusText = "Ready"
+        }
+    }
+
+    public func beginListening() async {
+        let interruptionMilliseconds = await interruptActiveTurn()
+        await publish {
+            $0.state = .listening
+            $0.generation = gate.value
+            $0.statusText = "Listening"
+            $0.activeRunID = nil
+            $0.approval = nil
+            $0.userText = ""
+            $0.assistantText = ""
+            $0.speechProvider = nil
+            $0.routingStatus = SpeechRoutingStatus()
+            $0.metrics = TurnMetrics(interruptionMilliseconds: interruptionMilliseconds)
+            $0.toolActivities = []
+        }
+    }
+
+    public func submit(samples: [Float]) async {
+        let generation = gate.value
+        guard !samples.isEmpty else {
+            await publish {
+                $0.state = .idle
+                $0.statusText = "No audio captured"
+            }
+            return
+        }
+
+        let clock = ContinuousClock()
+        do {
+            await publish {
+                $0.metrics.captureMilliseconds = samples.count / 16
+                $0.state = .transcribing
+                $0.statusText = "Transcribing"
+            }
+            let sttStart = clock.now
+            let transcript = try await recognizer.transcribe(samples: samples)
+            let sttMilliseconds = sttStart.duration(to: clock.now).milliseconds
+            let routingStatus = await recognizer.routingStatus()
+            guard gate.value == generation else { return }
+
+            let text = transcript.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                await publish {
+                    $0.state = .idle
+                    $0.statusText = "No speech detected"
+                }
+                return
+            }
+
+            await publish {
+                $0.userText = text
+                $0.speechProvider = transcript.provider
+                $0.routingStatus = routingStatus
+                $0.metrics.sttMilliseconds = sttMilliseconds
+                $0.state = .thinking
+                $0.statusText = "Hermes is thinking"
+            }
+            try await processPrompt(text, generation: generation, speakResponse: true, clock: clock)
+        } catch {
+            await handleSubmissionFailure(error, generation: generation, includeRoutingStatus: true)
+        }
+    }
+
+    public func submit(text: String, speakResponse: Bool) async {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        let interruptionMilliseconds = await interruptActiveTurn()
+        let generation = gate.value
+        await publish {
+            $0.state = .thinking
+            $0.generation = generation
+            $0.statusText = "Hermes is thinking"
+            $0.activeRunID = nil
+            $0.approval = nil
+            $0.userText = text
+            $0.assistantText = ""
+            $0.speechProvider = nil
+            $0.routingStatus = SpeechRoutingStatus()
+            $0.metrics = TurnMetrics(interruptionMilliseconds: interruptionMilliseconds)
+            $0.toolActivities = []
+        }
+
+        do {
+            try await processPrompt(
+                text,
+                generation: generation,
+                speakResponse: speakResponse,
+                clock: ContinuousClock()
+            )
+        } catch {
+            await handleSubmissionFailure(error, generation: generation, includeRoutingStatus: false)
+        }
+    }
+
+    private func processPrompt(
+        _ text: String,
+        generation: Int,
+        speakResponse: Bool,
+        clock: ContinuousClock
+    ) async throws {
+        let promptUptime = uptime()
+        if let lastPromptUptime,
+           promptUptime - lastPromptUptime > conversationTimeout {
+            sessionID = UUID().uuidString
+        }
+        lastPromptUptime = promptUptime
+
+        let hermesStart = clock.now
+        let run = try await hermes.createRun(input: text, sessionID: sessionID)
+        guard gate.value == generation else {
+            try? await hermes.stopRun(runID: run.runID)
+            return
+        }
+
+        let active = gate.activate(runID: run.runID)
+        if speakResponse {
+            startSpeechStream()
+        }
+        await publish {
+            $0.activeRunID = run.runID
+            $0.generation = active.value
+        }
+
+        let stream = try await hermes.streamEvents(runID: run.runID)
+        var sentenceBuffer = SentenceBuffer()
+        var receivedDelta = false
+        var terminalEvent: String?
+
+        for try await event in stream {
+            guard gate.accepts(runID: event.runID, generation: active.value) else { continue }
+            if event.event == "message.delta", let delta = event.delta {
+                let isFirstDelta = !receivedDelta
+                receivedDelta = true
+                await publish {
+                    $0.assistantText += delta
+                    if isFirstDelta {
+                        $0.metrics.hermesFirstDeltaMilliseconds = hermesStart.duration(to: clock.now).milliseconds
+                    }
+                }
+                if speakResponse {
+                    let sentences = sentenceBuffer.append(delta)
+                    for sentence in sentences {
+                        speechContinuation?.yield(sentence)
+                    }
+                    if !sentences.isEmpty {
+                        await publish {
+                            if $0.metrics.ttsQueuedMilliseconds == nil {
+                                $0.metrics.ttsQueuedMilliseconds = hermesStart.duration(to: clock.now).milliseconds
+                            }
+                            $0.state = .speaking
+                            $0.statusText = "Speaking while Hermes responds"
+                        }
+                    }
+                }
+            } else {
+                await handleLifecycle(event)
+            }
+            if event.isTerminal {
+                terminalEvent = event.event
+                break
+            }
+        }
+
+        guard gate.accepts(runID: run.runID, generation: active.value) else { return }
+        await publish {
+            $0.metrics.hermesCompletionMilliseconds = hermesStart.duration(to: clock.now).milliseconds
+        }
+        if terminalEvent == nil {
+            let reconciled = try await hermes.getRun(runID: run.runID)
+            guard reconciled.status == "completed" else {
+                throw HermesClientError.streamClosedWithoutTerminalEvent
+            }
+            terminalEvent = "run.completed"
+            if let output = reconciled.output, !output.isEmpty {
+                await publish { $0.assistantText = output }
+            }
+        }
+
+        guard terminalEvent == "run.completed" else {
+            gate.complete(runID: run.runID, generation: active.value)
+            snapshot.activeRunID = nil
+            await stopSpeech()
+            return
+        }
+
+        if speakResponse {
+            if let remainder = sentenceBuffer.flush() {
+                speechContinuation?.yield(remainder)
+            } else if !receivedDelta {
+                let finalOutput = snapshot.assistantText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !finalOutput.isEmpty { speechContinuation?.yield(finalOutput) }
+            }
+        }
+
+        gate.complete(runID: run.runID, generation: active.value)
+        snapshot.activeRunID = nil
+        if speakResponse {
+            await finishSpeech()
+        }
+        guard gate.value == active.value else { return }
+
+        await publish {
+            $0.state = .idle
+            $0.statusText = "Ready"
+        }
+    }
+
+    private func interruptActiveTurn() async -> Int? {
+        let clock = ContinuousClock()
+        let interruptionStart = clock.now
+        let interrupted = gate.invalidate()
+        let hadActiveOutput = interrupted != nil || speechContextID != nil || speechTask != nil
+        await stopSpeech()
+
+        if let interrupted {
+            Task { try? await hermes.stopRun(runID: interrupted.runID) }
+        }
+        return hadActiveOutput
+            ? interruptionStart.duration(to: clock.now).milliseconds
+            : nil
+    }
+
+    private func handleSubmissionFailure(
+        _ error: Error,
+        generation: Int,
+        includeRoutingStatus: Bool
+    ) async {
+        guard gate.value == generation else { return }
+        if includeRoutingStatus {
+            let routingStatus = await recognizer.routingStatus()
+            await publish { $0.routingStatus = routingStatus }
+        }
+        if let active = gate.active {
+            gate.complete(runID: active.runID, generation: active.value)
+            try? await hermes.stopRun(runID: active.runID)
+        }
+        await stopSpeech()
+        await fail(error)
+    }
+
+    public func respondToApproval(_ choice: HermesApprovalChoice) async {
+        guard let active = gate.active else { return }
+        do {
+            try await hermes.respondToApproval(runID: active.runID, choice: choice)
+            await publish {
+                $0.approval = nil
+                $0.state = .thinking
+                $0.statusText = "Hermes is continuing"
+            }
+        } catch {
+            await fail(error)
+        }
+    }
+
+    public func newConversation() async {
+        let interrupted = gate.invalidate()
+        await stopSpeech()
+        if let interrupted {
+            try? await hermes.stopRun(runID: interrupted.runID)
+        }
+        sessionID = UUID().uuidString
+        lastPromptUptime = nil
+        snapshot = VoiceSnapshot(state: .idle, generation: gate.value, statusText: "New conversation")
+        await onSnapshot(snapshot)
+    }
+
+    public func shutdown() async {
+        let interrupted = gate.invalidate()
+        await stopSpeech()
+        if let interrupted {
+            try? await hermes.stopRun(runID: interrupted.runID)
+        }
+        await publish {
+            $0.state = .idle
+            $0.statusText = "Stopped"
+            $0.activeRunID = nil
+            $0.approval = nil
+        }
+    }
+
+    private func startSpeechStream() {
+        speechContinuation?.finish()
+        speechTask?.cancel()
+
+        let contextID = UUID()
+        speechContextID = contextID
+        let (stream, continuation) = AsyncStream.makeStream(of: String.self)
+        speechContinuation = continuation
+        speechTask = Task { [synthesizer] in
+            for await sentence in stream {
+                guard !Task.isCancelled else { break }
+                try? await synthesizer.speak(sentence, contextID: contextID)
+            }
+        }
+    }
+
+    private func finishSpeech() async {
+        speechContinuation?.finish()
+        speechContinuation = nil
+        let task = speechTask
+        speechTask = nil
+        await task?.value
+        speechContextID = nil
+    }
+
+    private func stopSpeech() async {
+        speechContinuation?.finish()
+        speechContinuation = nil
+        speechTask?.cancel()
+        speechTask = nil
+        await synthesizer.stop(contextID: speechContextID)
+        speechContextID = nil
+    }
+
+    private func handleLifecycle(_ event: HermesEvent) async {
+        switch event.event {
+        case "tool.started":
+            await publish {
+                let name = event.tool ?? "Tool"
+                $0.toolActivities.append(ToolActivity(name: name, preview: event.preview ?? event.command))
+                if $0.toolActivities.count > 12 {
+                    $0.toolActivities.removeFirst($0.toolActivities.count - 12)
+                }
+                $0.state = .tool
+                $0.statusText = "Using \(name)"
+            }
+        case "tool.completed":
+            await publish {
+                let name = event.tool ?? "Tool"
+                if let index = $0.toolActivities.lastIndex(where: { $0.name == name && $0.state == .running }) {
+                    $0.toolActivities[index].state = event.error == nil ? .completed : .failed
+                } else {
+                    $0.toolActivities.append(ToolActivity(
+                        name: name,
+                        preview: event.preview,
+                        state: event.error == nil ? .completed : .failed
+                    ))
+                }
+                $0.state = .thinking
+                $0.statusText = event.error == nil ? "Hermes is thinking" : "Tool failed"
+            }
+        case "approval.request":
+            let prompt = event.command ?? event.preview ?? "Hermes needs approval"
+            await publish {
+                $0.state = .approval
+                $0.statusText = "Approval required"
+                $0.approval = ApprovalRequest(
+                    id: event.approvalID ?? event.runID,
+                    prompt: prompt,
+                    choices: event.choices ?? [.once, .session, .deny]
+                )
+            }
+        case "approval.responded":
+            await publish {
+                $0.approval = nil
+                $0.state = .thinking
+                $0.statusText = "Hermes is continuing"
+            }
+        case "run.completed":
+            if let output = event.output, !output.isEmpty {
+                await publish { $0.assistantText = output }
+            }
+        case "run.failed":
+            await publish {
+                $0.state = .error
+                $0.statusText = event.error ?? "Hermes run failed"
+            }
+        case "run.cancelled":
+            await publish {
+                $0.state = .idle
+                $0.statusText = "Cancelled"
+            }
+        default:
+            break
+        }
+    }
+
+    private func fail(_ error: Error) async {
+        await publish {
+            $0.state = .error
+            $0.statusText = String(describing: error)
+            $0.activeRunID = nil
+        }
+    }
+
+    private func publish(_ update: (inout VoiceSnapshot) -> Void) async {
+        update(&snapshot)
+        await onSnapshot(snapshot)
+    }
+}
+
+private extension Duration {
+    var milliseconds: Int {
+        let components = self.components
+        let seconds = components.seconds * 1_000
+        let attoseconds = components.attoseconds / 1_000_000_000_000_000
+        return Int(seconds + attoseconds)
+    }
+}

@@ -1,0 +1,49 @@
+name: JarvisMac
+options:
+  bundleIdPrefix: com.jarvis
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+configs:
+  Debug: debug
+  Release: release
+packages:
+  JarvisPackage:
+    path: .
+settings:
+  base:
+    ARCHS: arm64
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_VERSION: "5.10"
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "Apple Development: senderopp@icloud.com (Y3GCC2VAB2)"
+    DEVELOPMENT_TEAM: ZRU5DU22H4
+targets:
+  JarvisNativeApp:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/JarvisApp
+    dependencies:
+      - package: JarvisPackage
+        product: JarvisCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jarvis.voice-assistant
+        PRODUCT_NAME: J.A.R.V.I.S
+        EXECUTABLE_NAME: JarvisApp
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: Packaging/Jarvis.entitlements
+        INFOPLIST_FILE: Packaging/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: NO
+        ONLY_ACTIVE_ARCH: NO
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+    scheme:
+      testTargets: []
+      gatherCoverageData: false
+      archive:
+        config: Release

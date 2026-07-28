@@ -77,9 +77,16 @@ final class AppModel: ObservableObject {
         let capture = AudioCaptureService()
         let hotkey = GlobalHotkey()
         let snapshotRelay = SnapshotRelay()
-        let runtime = Self.makeRuntime(config: config, snapshotRelay: snapshotRelay)
         let preferences = AppPreferencesStore.load()
         let persistsHistory = preferences.persistTranscriptHistory
+        let conversationContext = ConversationContextStore.load()
+        let conversationContextUpdatedAt = ConversationContextStore.lastUpdatedAt()
+        let runtime = Self.makeRuntime(
+            config: config,
+            snapshotRelay: snapshotRelay,
+            conversationContext: conversationContext,
+            conversationContextUpdatedAt: conversationContextUpdatedAt
+        )
 
         self.capture = capture
         self.hotkey = hotkey
@@ -154,9 +161,12 @@ final class AppModel: ObservableObject {
         let previousPipeline = pipeline
         let previousServer = hermesServer
         let reusesHermesServer = usesSameHermesServer(currentConfig, config)
+        let conversationContext = ConversationContextStore.load()
         let candidate = Self.makeRuntime(
             config: config,
             snapshotRelay: snapshotRelay,
+            conversationContext: conversationContext,
+            conversationContextUpdatedAt: ConversationContextStore.lastUpdatedAt(),
             hermesServer: reusesHermesServer ? previousServer : nil
         )
 
@@ -262,6 +272,9 @@ final class AppModel: ObservableObject {
     func clearHistory() {
         history.removeAll()
         ConversationHistoryStore.clear()
+        ConversationContextStore.clear()
+        let pipeline = pipeline
+        Task { await pipeline.newConversation() }
     }
 
     func openMicrophoneSettings() {
@@ -574,6 +587,8 @@ final class AppModel: ObservableObject {
     private static func makeRuntime(
         config: AppConfig,
         snapshotRelay: SnapshotRelay,
+        conversationContext: [ConversationTurn],
+        conversationContextUpdatedAt: Date?,
         hermesServer suppliedServer: HermesServerController? = nil
     ) -> Runtime {
         let apiKey = config.hermesAPIKey ?? InstallationIdentity.hermesAPIKey()
@@ -629,7 +644,12 @@ final class AppModel: ObservableObject {
         let pipeline = VoicePipeline(
             recognizer: recognizer,
             hermes: hermes,
-            synthesizer: synthesizer
+            synthesizer: synthesizer,
+            conversationContext: conversationContext,
+            conversationContextUpdatedAt: conversationContextUpdatedAt,
+            onConversationContextChanged: { turns in
+                _ = ConversationContextStore.save(turns)
+            }
         ) { snapshot in
             await snapshotRelay.deliver(snapshot)
         }

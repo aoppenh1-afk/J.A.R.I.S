@@ -27,6 +27,7 @@ private actor UnavailableRecognizer: SpeechRecognizing {
 private actor ControlledHermes: HermesServicing {
     private var continuation: AsyncThrowingStream<HermesEvent, Error>.Continuation?
     private var inputs: [String] = []
+    private var streamsStarted = 0
 
     func health() -> [String: String] { ["status": "ok"] }
     func capabilities() -> Data { Data() }
@@ -39,6 +40,7 @@ private actor ControlledHermes: HermesServicing {
     func streamEvents(runID: String) -> AsyncThrowingStream<HermesEvent, Error> {
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: HermesEvent.self)
         self.continuation = continuation
+        streamsStarted += 1
         return stream
     }
 
@@ -63,6 +65,14 @@ private actor ControlledHermes: HermesServicing {
 
     func recordedInputs() -> [String] {
         inputs
+    }
+
+    func inputCount() -> Int {
+        inputs.count
+    }
+
+    func streamCount() -> Int {
+        streamsStarted
     }
 }
 
@@ -215,6 +225,50 @@ final class VoicePipelineTests: XCTestCase {
         await submission.value
 
         XCTAssertEqual(synthesizer.spoken, ["First sentence.", "Remaining fragment"])
+    }
+
+    @MainActor
+    func testTypedFollowUpIncludesCompletedConversationContext() async {
+        let hermes = ControlledHermes()
+        let pipeline = VoicePipeline(
+            recognizer: UnavailableRecognizer(),
+            hermes: hermes,
+            synthesizer: RecordingSynthesizer(),
+            onSnapshot: { _ in }
+        )
+
+        let first = Task { await pipeline.submit(text: "What is 5 + 5?", speakResponse: false) }
+        while await hermes.streamCount() < 1 {
+            await Task.yield()
+        }
+        await hermes.send(HermesEvent(
+            event: "run.completed",
+            runID: "run-1",
+            timestamp: 1,
+            output: "10",
+            error: nil
+        ))
+        await hermes.finish()
+        await first.value
+
+        let second = Task { await pipeline.submit(text: "Now add 2.", speakResponse: false) }
+        while await hermes.streamCount() < 2 {
+            await Task.yield()
+        }
+        let inputs = await hermes.recordedInputs()
+        XCTAssertTrue(inputs[1].contains("<user>What is 5 + 5?</user>"))
+        XCTAssertTrue(inputs[1].contains("<assistant>10</assistant>"))
+        XCTAssertTrue(inputs[1].contains("<current_user_request>\nNow add 2.\n</current_user_request>"))
+
+        await hermes.send(HermesEvent(
+            event: "run.completed",
+            runID: "run-1",
+            timestamp: 2,
+            output: "12",
+            error: nil
+        ))
+        await hermes.finish()
+        await second.value
     }
 
     @MainActor

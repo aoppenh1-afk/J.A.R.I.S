@@ -60,5 +60,10 @@ public extension SpeechRecognizing {
 @MainActor
 public protocol SpeechSynthesizing: AnyObject, Sendable {
     func speak(_ text: String, contextID: UUID) async throws
+    func finish(contextID: UUID) async throws
     func stop(contextID: UUID?)
+}
+
+public extension SpeechSynthesizing {
+    func finish(contextID: UUID) async throws {}
 }

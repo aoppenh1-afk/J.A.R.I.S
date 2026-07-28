@@ -176,7 +176,7 @@ struct SettingsView: View {
                 Toggle("Keep the last 50 completed turns", isOn: $preferences.persistTranscriptHistory)
                 Text(preferences.persistTranscriptHistory
                      ? "Completed transcript text is stored locally in UserDefaults until cleared."
-                     : "History is kept only in memory and disappears when J.A.R.V.I.S. quits.")
+                     : "Transcript history is kept only in memory and disappears when J.A.R.V.I.S. quits. Conversation context is stored separately and resets after five minutes without an exchange.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

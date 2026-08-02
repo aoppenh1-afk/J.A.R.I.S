@@ -56,6 +56,51 @@ final class DeepgramSynthesizerTests: XCTestCase {
         XCTAssertFalse(url.absoluteString.contains("container=wav"))
     }
 
+    func testWaitsForPrebufferWhileTextIsStillStreaming() {
+        XCTAssertFalse(
+            DeepgramSynthesizer.shouldStartPlayback(
+                pendingFrames: 11_999,
+                isFinishing: false,
+                sentFlushCount: 1,
+                receivedFlushCount: 1
+            )
+        )
+        XCTAssertTrue(
+            DeepgramSynthesizer.shouldStartPlayback(
+                pendingFrames: 12_000,
+                isFinishing: false,
+                sentFlushCount: 1,
+                receivedFlushCount: 0
+            )
+        )
+    }
+
+    func testStartsShortBufferedAudioAfterStreamingFinishes() {
+        XCTAssertFalse(
+            DeepgramSynthesizer.shouldStartPlayback(
+                pendingFrames: 1,
+                isFinishing: true,
+                sentFlushCount: 1,
+                receivedFlushCount: 0
+            )
+        )
+        XCTAssertTrue(
+            DeepgramSynthesizer.shouldStartPlayback(
+                pendingFrames: 1,
+                isFinishing: true,
+                sentFlushCount: 1,
+                receivedFlushCount: 1
+            )
+        )
+    }
+
+    func testRemovesAsterisksFromSpokenText() {
+        XCTAssertEqual(
+            DeepgramSynthesizer.spokenText(from: "  This is **important**. *  "),
+            "This is important."
+        )
+    }
+
     func testStreamsSentenceChunksOverOneConnectionAndFlushes() async throws {
         let transport = FakeDeepgramTTSStreamingTransport()
         var authorization: String?

@@ -21,7 +21,11 @@ let package = Package(
         .executableTarget(
             name: "JarvisApp",
             dependencies: ["JarvisCore"],
-            resources: [.process("Resources")]
+            resources: [
+                .process("Resources/MenuBarIconTemplate.png"),
+                .process("Resources/MenuBarIconTemplate@2x.png"),
+                .copy("Resources/GlassVoiceOrbStudy"),
+            ]
         ),
         .executableTarget(
             name: "JarvisDiagnostics",

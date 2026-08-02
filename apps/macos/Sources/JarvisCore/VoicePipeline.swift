@@ -10,6 +10,7 @@ public actor VoicePipeline {
     private let conversationTimeout: TimeInterval
     private let uptime: @Sendable () -> TimeInterval
     private let onConversationContextChanged: @Sendable ([ConversationTurn]) async -> Void
+    private let onConversationSessionReset: @Sendable () async -> Void
     private var sessionID: String
     private var lastExchangeUptime: TimeInterval?
     private var conversationContext: [ConversationTurn]
@@ -30,6 +31,7 @@ public actor VoicePipeline {
         conversationContext: [ConversationTurn] = [],
         conversationContextUpdatedAt: Date? = nil,
         onConversationContextChanged: @escaping @Sendable ([ConversationTurn]) async -> Void = { _ in },
+        onConversationSessionReset: @escaping @Sendable () async -> Void = {},
         onSnapshot: @escaping SnapshotHandler
     ) {
         self.recognizer = recognizer
@@ -44,6 +46,7 @@ public actor VoicePipeline {
             self.lastExchangeUptime = uptime() - elapsed
         }
         self.onConversationContextChanged = onConversationContextChanged
+        self.onConversationSessionReset = onConversationSessionReset
         self.onSnapshot = onSnapshot
     }
 
@@ -172,6 +175,7 @@ public actor VoicePipeline {
             self.lastExchangeUptime = nil
             conversationContext.removeAll()
             await onConversationContextChanged(conversationContext)
+            await onConversationSessionReset()
         }
 
         let hermesStart = clock.now

@@ -1,5 +1,19 @@
 import Foundation
 
+public struct AudioFrequencyBands: Sendable, Equatable {
+    public var low: Float
+    public var mid: Float
+    public var high: Float
+
+    public init(low: Float = 0, mid: Float = 0, high: Float = 0) {
+        self.low = low
+        self.mid = mid
+        self.high = high
+    }
+
+    public static let zero = AudioFrequencyBands()
+}
+
 public enum VoiceState: String, Sendable, Equatable {
     case starting
     case idle
@@ -107,7 +121,7 @@ public struct VoiceSnapshot: Sendable, Equatable {
     public var routingStatus: SpeechRoutingStatus
     public var metrics: TurnMetrics
     public var toolActivities: [ToolActivity]
-
+    public var audioBands: AudioFrequencyBands
     public init(
         state: VoiceState = .starting,
         generation: Int = 0,
@@ -119,7 +133,8 @@ public struct VoiceSnapshot: Sendable, Equatable {
         speechProvider: SpeechProvider? = nil,
         routingStatus: SpeechRoutingStatus = SpeechRoutingStatus(),
         metrics: TurnMetrics = TurnMetrics(),
-        toolActivities: [ToolActivity] = []
+        toolActivities: [ToolActivity] = [],
+        audioBands: AudioFrequencyBands = .zero
     ) {
         self.state = state
         self.generation = generation
@@ -132,5 +147,6 @@ public struct VoiceSnapshot: Sendable, Equatable {
         self.routingStatus = routingStatus
         self.metrics = metrics
         self.toolActivities = toolActivities
+        self.audioBands = audioBands
     }
 }

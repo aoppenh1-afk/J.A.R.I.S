@@ -53,10 +53,13 @@ public final class DeepgramSynthesizer: SpeechSynthesizing {
     private let apiKey: String
     private let model: String
     private let endpoint: URL
+    private static let sampleRate = 24_000
+    private static let playbackPrebufferFrameCount = AVAudioFrameCount(sampleRate / 2)
+
     private let transportFactory: TransportFactory
     private let audioFormat = AVAudioFormat(
         commonFormat: .pcmFormatInt16,
-        sampleRate: 24_000,
+        sampleRate: Double(sampleRate),
         channels: 1,
         interleaved: true
     )!
@@ -67,6 +70,7 @@ public final class DeepgramSynthesizer: SpeechSynthesizing {
     private var audioEngine: AVAudioEngine?
     private var playerNode: AVAudioPlayerNode?
     private var pendingBuffers = 0
+    private var pendingFrames: AVAudioFrameCount = 0
     private var playbackStarted = false
     private var sentFlushCount = 0
     private var receivedFlushCount = 0
@@ -101,7 +105,7 @@ public final class DeepgramSynthesizer: SpeechSynthesizing {
     }
 
     public func speak(_ text: String, contextID: UUID) async throws {
-        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = Self.spokenText(from: text)
         guard !text.isEmpty else { return }
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw DeepgramSpeechError.missingAPIKey
@@ -129,6 +133,7 @@ public final class DeepgramSynthesizer: SpeechSynthesizing {
         isFinishing = true
         try await withCheckedThrowingContinuation { continuation in
             finishContinuation = continuation
+            startPlaybackIfReady()
             finishIfDrained()
         }
     }
@@ -177,6 +182,7 @@ public final class DeepgramSynthesizer: SpeechSynthesizing {
         audioEngine = engine
         playerNode = player
         pendingBuffers = 0
+        pendingFrames = 0
         playbackStarted = false
         sentFlushCount = 0
         receivedFlushCount = 0
@@ -233,10 +239,12 @@ public final class DeepgramSynthesizer: SpeechSynthesizing {
             destination.update(from: source.assumingMemoryBound(to: Int16.self), count: frameCount)
         }
         buffer.frameLength = AVAudioFrameCount(frameCount)
+        let scheduledFrameCount = buffer.frameLength
         pendingBuffers += 1
+        pendingFrames += scheduledFrameCount
         playerNode.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in
-                self?.didPlayBuffer(contextID: contextID)
+                self?.didPlayBuffer(frameCount: scheduledFrameCount, contextID: contextID)
             }
         }
         startPlaybackIfReady()
@@ -249,20 +257,42 @@ public final class DeepgramSynthesizer: SpeechSynthesizing {
               let type = (message["type"] as? String)?.lowercased() else { return }
         guard type == "flushed" else { return }
         receivedFlushCount += 1
+        startPlaybackIfReady()
         finishIfDrained()
+    }
+
+    static func shouldStartPlayback(
+        pendingFrames: AVAudioFrameCount,
+        isFinishing: Bool,
+        sentFlushCount: Int,
+        receivedFlushCount: Int
+    ) -> Bool {
+        pendingFrames >= playbackPrebufferFrameCount
+            || (isFinishing && receivedFlushCount >= sentFlushCount)
     }
 
     private func startPlaybackIfReady() {
         guard !playbackStarted,
               pendingBuffers > 0,
+              Self.shouldStartPlayback(
+                  pendingFrames: pendingFrames,
+                  isFinishing: isFinishing,
+                  sentFlushCount: sentFlushCount,
+                  receivedFlushCount: receivedFlushCount
+              ),
               let playerNode else { return }
         playbackStarted = true
         playerNode.play()
     }
 
-    private func didPlayBuffer(contextID: UUID) {
+    private func didPlayBuffer(frameCount: AVAudioFrameCount, contextID: UUID) {
         guard activeContextID == contextID else { return }
         pendingBuffers = max(0, pendingBuffers - 1)
+        pendingFrames = frameCount >= pendingFrames ? 0 : pendingFrames - frameCount
+        if pendingBuffers == 0, !isFinishing {
+            playerNode?.pause()
+            playbackStarted = false
+        }
         finishIfDrained()
     }
 
@@ -286,11 +316,17 @@ public final class DeepgramSynthesizer: SpeechSynthesizing {
         audioEngine = nil
         activeContextID = nil
         pendingBuffers = 0
+        pendingFrames = 0
         playbackStarted = false
         sentFlushCount = 0
         receivedFlushCount = 0
         isFinishing = false
         streamError = nil
+    }
+
+    static func spokenText(from text: String) -> String {
+        text.replacingOccurrences(of: "*", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func speakMessage(_ text: String) -> String {

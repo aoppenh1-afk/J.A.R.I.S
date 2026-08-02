@@ -14,6 +14,9 @@ final class AppPreferencesTests: XCTestCase {
         preferences.speakTypedResponses = true
         preferences.appearance = .dark
         preferences.orbVisibility = .always
+        preferences.voiceOrbStyle = .glass
+        preferences.shuffleVoiceOrbs = true
+        preferences.shuffledVoiceOrbStyles = [.radial, .glass]
         preferences.automaticallySubmitOrbAfterSilence = false
         preferences.orbSilenceDuration = 2.25
 
@@ -69,6 +72,36 @@ final class AppPreferencesTests: XCTestCase {
         let decoded = try JSONDecoder().decode(AppPreferences.self, from: legacyData)
 
         XCTAssertEqual(decoded.orbVisibility, .duringRun)
+    }
+
+    func testMissingVoiceOrbPreferencesUseDefaults() throws {
+        let encoded = try JSONEncoder().encode(AppPreferences(
+            voiceOrbStyle: .glass,
+            shuffleVoiceOrbs: true,
+            shuffledVoiceOrbStyles: [.radial, .glass]
+        ))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "voiceOrbStyle")
+        object.removeValue(forKey: "shuffleVoiceOrbs")
+        object.removeValue(forKey: "shuffledVoiceOrbStyles")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(AppPreferences.self, from: legacyData)
+
+        XCTAssertEqual(decoded.voiceOrbStyle, .thinking)
+        XCTAssertFalse(decoded.shuffleVoiceOrbs)
+        XCTAssertEqual(decoded.shuffledVoiceOrbStyles, Set(VoiceOrbStyle.allCases))
+    }
+
+    func testEmptyShuffledVoiceOrbStylesFallBackToAllStyles() throws {
+        let encoded = try JSONEncoder().encode(AppPreferences())
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["shuffledVoiceOrbStyles"] = []
+        let data = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(AppPreferences.self, from: data)
+
+        XCTAssertEqual(decoded.shuffledVoiceOrbStyles, Set(VoiceOrbStyle.allCases))
     }
 
     func testMissingTypedSpeechPreferenceDefaultsToDisabled() throws {

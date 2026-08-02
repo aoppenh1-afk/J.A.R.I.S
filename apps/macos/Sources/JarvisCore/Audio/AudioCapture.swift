@@ -1,3 +1,4 @@
+import Accelerate
 import AVFoundation
 import Foundation
 
@@ -40,6 +41,139 @@ public enum AudioInputFormatValidator {
         }
     }
 }
+public struct AudioCaptureSignal: Sendable, Equatable {
+    public let rms: Float
+    public let bands: AudioFrequencyBands
+
+    public init(rms: Float, bands: AudioFrequencyBands) {
+        self.rms = rms
+        self.bands = bands
+    }
+
+    static func analyze(samples: [Float], sampleRate: Double) -> AudioCaptureSignal {
+        AudioSpectrumAnalyzer().analyze(samples: samples, sampleRate: sampleRate)
+    }
+}
+
+/// Mirrors the upstream Web Audio analyser: a 1024-sample Hann-windowed FFT,
+/// per-bin decibel mapping, a 0.78 smoothing constant, and broad low/mid/high
+/// frequency averages. Keeping the smoothing before band aggregation prevents
+/// individual microphone buffers from making the listening wave visibly jump.
+private final class AudioSpectrumAnalyzer {
+    private static let fftSize = 1_024
+    private static let binCount = fftSize / 2
+    private static let spectrumSmoothing: Float = 0.78
+
+    private let log2FFTSize = vDSP_Length(log2(Float(fftSize)))
+    private let fftSetup: FFTSetup
+    private var rollingSamples = [Float](repeating: 0, count: fftSize)
+    private var window = [Float](repeating: 0, count: fftSize)
+    private var windowedSamples = [Float](repeating: 0, count: fftSize)
+    private var real = [Float](repeating: 0, count: binCount)
+    private var imaginary = [Float](repeating: 0, count: binCount)
+    private var power = [Float](repeating: 0, count: binCount)
+    private var smoothedSpectrum = [Float](repeating: 0, count: binCount)
+
+    init() {
+        guard let setup = vDSP_create_fftsetup(log2FFTSize, FFTRadix(kFFTRadix2)) else {
+            fatalError("Unable to create the microphone spectrum FFT setup.")
+        }
+        fftSetup = setup
+        vDSP_hann_window(&window, vDSP_Length(Self.fftSize), Int32(vDSP_HANN_NORM))
+    }
+
+    deinit {
+        vDSP_destroy_fftsetup(fftSetup)
+    }
+
+    func reset() {
+        rollingSamples.withUnsafeMutableBufferPointer { $0.initialize(repeating: 0) }
+        smoothedSpectrum.withUnsafeMutableBufferPointer { $0.initialize(repeating: 0) }
+    }
+
+    func analyze(samples: [Float], sampleRate _: Double) -> AudioCaptureSignal {
+        let meanSquare = samples.reduce(Float.zero) { $0 + $1 * $1 } / Float(max(samples.count, 1))
+        let rms = sqrt(meanSquare)
+        guard !samples.isEmpty else {
+            return AudioCaptureSignal(rms: 0, bands: .zero)
+        }
+
+        appendToRollingWindow(samples)
+        vDSP_vmul(
+            rollingSamples, 1,
+            window, 1,
+            &windowedSamples, 1,
+            vDSP_Length(Self.fftSize)
+        )
+
+        real.withUnsafeMutableBufferPointer { realBuffer in
+            imaginary.withUnsafeMutableBufferPointer { imaginaryBuffer in
+                var split = DSPSplitComplex(
+                    realp: realBuffer.baseAddress!,
+                    imagp: imaginaryBuffer.baseAddress!
+                )
+                windowedSamples.withUnsafeBytes { rawBuffer in
+                    let interleaved = rawBuffer.bindMemory(to: DSPComplex.self)
+                    vDSP_ctoz(
+                        interleaved.baseAddress!, 2,
+                        &split, 1,
+                        vDSP_Length(Self.binCount)
+                    )
+                }
+                vDSP_fft_zrip(fftSetup, &split, 1, log2FFTSize, FFTDirection(FFT_FORWARD))
+                vDSP_zvmags(&split, 1, &power, 1, vDSP_Length(Self.binCount))
+            }
+        }
+
+        // Web Audio's default byte-frequency range maps roughly -100 dB to
+        // -30 dB into [0, 1]. Apply the same mapping before its 0.78 smoothing.
+        let amplitudeScale = 1 / Float(Self.fftSize)
+        smoothedSpectrum[0] = 0 // Ignore DC, which otherwise dominates the low band.
+        for index in 1..<Self.binCount {
+            let amplitude = sqrt(max(power[index], 0)) * amplitudeScale
+            let decibels = 20 * log10(max(amplitude, 0.000_000_1))
+            let normalized = min(1, max(0, (decibels + 100) / 70))
+            smoothedSpectrum[index] =
+                smoothedSpectrum[index] * Self.spectrumSmoothing
+                + normalized * (1 - Self.spectrumSmoothing)
+        }
+
+        let lowEnd = max(2, Int(Float(Self.binCount) * 0.08))
+        let midEnd = max(lowEnd + 1, Int(Float(Self.binCount) * 0.40))
+        let low = average(in: 1..<lowEnd)
+        let mid = average(in: lowEnd..<midEnd)
+        let high = average(in: midEnd..<Self.binCount)
+
+        return AudioCaptureSignal(
+            rms: rms,
+            bands: AudioFrequencyBands(
+                low: scaledBand(low, multiplier: 2.6),
+                mid: scaledBand(mid, multiplier: 3.2),
+                high: scaledBand(high, multiplier: 4.0)
+            )
+        )
+    }
+
+    private func appendToRollingWindow(_ samples: [Float]) {
+        let appendedCount = min(samples.count, Self.fftSize)
+        if appendedCount == Self.fftSize {
+            rollingSamples.replaceSubrange(0..<Self.fftSize, with: samples.suffix(Self.fftSize))
+            return
+        }
+        rollingSamples.removeFirst(appendedCount)
+        rollingSamples.append(contentsOf: samples.suffix(appendedCount))
+    }
+
+    private func average(in range: Range<Int>) -> Float {
+        guard !range.isEmpty else { return 0 }
+        return smoothedSpectrum[range].reduce(0, +) / Float(range.count)
+    }
+
+    private func scaledBand(_ value: Float, multiplier: Float) -> Float {
+        min(1, powf(max(0, value * multiplier), 0.8))
+    }
+}
+
 
 public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
     private var engine: AVAudioEngine?
@@ -47,6 +181,7 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
     private var samples: [Float] = []
     private var converter: AVAudioConverter?
     private var targetFormat: AVAudioFormat?
+    private let spectrumAnalyzer = AudioSpectrumAnalyzer()
     private var capturing = false
     private var tapInstalled = false
 
@@ -59,6 +194,10 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
     }
 
     public func start(onAudioLevel: (@Sendable (Float) -> Void)?) throws {
+        try start { signal in onAudioLevel?(signal.rms) }
+    }
+
+    public func start(onAudioSignal: (@Sendable (AudioCaptureSignal) -> Void)?) throws {
         guard !capturing else { return }
         guard AVCaptureDevice.default(for: .audio) != nil else {
             throw AudioCaptureError.inputDeviceUnavailable
@@ -87,10 +226,11 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
             }
 
             lock.withLock { samples.removeAll(keepingCapacity: true) }
+            spectrumAnalyzer.reset()
             self.converter = converter
             self.targetFormat = targetFormat
             input.installTap(onBus: 0, bufferSize: 1_024, format: sourceFormat) { [weak self] buffer, _ in
-                self?.appendConverted(buffer, onAudioLevel: onAudioLevel)
+                self?.appendConverted(buffer, onAudioSignal: onAudioSignal)
             }
             tapInstalled = true
             engine.prepare()
@@ -121,6 +261,7 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
             tapInstalled = false
             converter = nil
             targetFormat = nil
+            spectrumAnalyzer.reset()
             return
         }
         if tapInstalled {
@@ -133,11 +274,12 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
         tapInstalled = false
         converter = nil
         targetFormat = nil
+        spectrumAnalyzer.reset()
     }
 
     private func appendConverted(
         _ input: AVAudioPCMBuffer,
-        onAudioLevel: (@Sendable (Float) -> Void)?
+        onAudioSignal: (@Sendable (AudioCaptureSignal) -> Void)?
     ) {
         guard let converter, let targetFormat else { return }
         let ratio = targetFormat.sampleRate / input.format.sampleRate
@@ -159,10 +301,7 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
         let converted = Array(UnsafeBufferPointer(start: channel, count: Int(output.frameLength)))
         lock.withLock { samples.append(contentsOf: converted) }
         guard !converted.isEmpty else { return }
-        let meanSquare = converted.reduce(Float.zero) { partial, sample in
-            partial + sample * sample
-        } / Float(converted.count)
-        onAudioLevel?(sqrt(meanSquare))
+        onAudioSignal?(spectrumAnalyzer.analyze(samples: converted, sampleRate: targetFormat.sampleRate))
     }
 }
 

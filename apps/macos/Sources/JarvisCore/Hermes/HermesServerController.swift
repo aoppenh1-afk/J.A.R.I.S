@@ -10,6 +10,7 @@ public actor HermesServerController {
     private let onUnexpectedExit: ExitHandler?
     private var process: Process?
     private var restartLimiter = RestartRateLimiter(maximumStarts: 3, window: 60)
+    private let readinessTimeout: Duration
     private var intentionalStops: Set<ObjectIdentifier> = []
     private var totalStartCount = 0
     private var unexpectedExitCount = 0
@@ -20,12 +21,14 @@ public actor HermesServerController {
         apiKey: String,
         executableOverride: String? = ProcessInfo.processInfo.environment["JARVIS_HERMES_EXECUTABLE"],
         session: URLSession = .shared,
+        readinessTimeout: Duration = .seconds(60),
         onUnexpectedExit: ExitHandler? = nil
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.executableOverride = executableOverride
         self.session = session
+        self.readinessTimeout = readinessTimeout
         self.onUnexpectedExit = onUnexpectedExit
     }
 
@@ -56,7 +59,7 @@ public actor HermesServerController {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = ["gateway", "run"]
-        var environment = ProcessInfo.processInfo.environment
+        var environment = Self.launchEnvironment(from: ProcessInfo.processInfo.environment)
         environment["API_SERVER_ENABLED"] = "1"
         environment["API_SERVER_HOST"] = host
         environment["API_SERVER_PORT"] = String(port)
@@ -78,6 +81,7 @@ public actor HermesServerController {
 
         do {
             try await waitUntilHealthy()
+            restartLimiter.reset()
         } catch {
             stopOwnedProcess()
             throw error
@@ -111,7 +115,7 @@ public actor HermesServerController {
 
     private func waitUntilHealthy() async throws {
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(20))
+        let deadline = clock.now.advanced(by: readinessTimeout)
         while clock.now < deadline {
             if await isHealthy() { return }
             if let process, !process.isRunning {
@@ -147,6 +151,23 @@ public actor HermesServerController {
             .map(URL.init(fileURLWithPath:))
     }
 
+    static func launchEnvironment(from inherited: [String: String]) -> [String: String] {
+        var environment = inherited
+        let preferredPaths = [
+            FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin").path,
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+        ]
+        let inheritedPaths = inherited["PATH"]?.split(separator: ":").map(String.init) ?? []
+        var seen = Set<String>()
+        environment["PATH"] = (preferredPaths + inheritedPaths)
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+            .joined(separator: ":")
+        return environment
+    }
+
     private func stopOwnedProcess() {
         guard let process else { return }
         if process.isRunning {
@@ -180,9 +201,13 @@ public struct RestartRateLimiter: Sendable, Equatable {
         starts.append(now)
         return true
     }
+
+    public mutating func reset() {
+        starts.removeAll()
+    }
 }
 
-public enum HermesServerError: Error, Equatable, CustomStringConvertible {
+public enum HermesServerError: Error, Equatable, CustomStringConvertible, LocalizedError {
     case autoStartRequiresLoopbackHTTP
     case executableNotFound
     case exitedBeforeReady(Int32)
@@ -190,6 +215,8 @@ public enum HermesServerError: Error, Equatable, CustomStringConvertible {
     case missingPort
     case readinessTimedOut
     case restartRateLimited
+
+    public var errorDescription: String? { description }
 
     public var description: String {
         switch self {
@@ -204,7 +231,7 @@ public enum HermesServerError: Error, Equatable, CustomStringConvertible {
         case .missingPort:
             return "The Hermes endpoint must include an explicit port."
         case .readinessTimedOut:
-            return "Hermes did not become ready within 20 seconds."
+            return "Hermes did not become ready before the startup deadline."
         case .restartRateLimited:
             return "Hermes restarted too frequently. Automatic restart is temporarily paused."
         }

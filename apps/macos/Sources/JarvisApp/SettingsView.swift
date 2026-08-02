@@ -87,7 +87,26 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Voice orb") {
+            Section("Voice orbs") {
+                Toggle("Shuffle selected orbs", isOn: $preferences.shuffleVoiceOrbs)
+                Text(preferences.shuffleVoiceOrbs
+                     ? "J.A.R.V.I.S. rotates through the selected designs every 12 seconds."
+                     : "Choose the design used by the floating voice orb.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    ForEach(VoiceOrbStyle.allCases) { style in
+                        voiceOrbCard(style)
+                    }
+                }
+
+                Text("Liquid Glass includes the exact Glass Voice Orb Study renderer for personal, non-commercial use. Its bundled LICENSE and NOTICE attribution are preserved in the application resources.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Section("Voice interaction") {
                 Toggle(
                     "Send automatically after silence",
                     isOn: $preferences.automaticallySubmitOrbAfterSilence
@@ -175,8 +194,8 @@ struct SettingsView: View {
             Section("Transcript history") {
                 Toggle("Keep the last 50 completed turns", isOn: $preferences.persistTranscriptHistory)
                 Text(preferences.persistTranscriptHistory
-                     ? "Completed transcript text is stored locally in UserDefaults until cleared."
-                     : "Transcript history is kept only in memory and disappears when J.A.R.V.I.S. quits. Conversation context is stored separately and resets after five minutes without an exchange.")
+                     ? "Completed transcript text is stored locally in UserDefaults. It still clears automatically after five minutes without an exchange, matching conversation context."
+                     : "Transcript history is kept only in memory and clears after five minutes without an exchange, or when J.A.R.V.I.S. quits.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -211,6 +230,52 @@ struct SettingsView: View {
         .onChange(of: preferences.speechMode) { _, mode in
             if mode != .auto { preferences.allowCloudFallback = false }
         }
+    }
+
+    private func voiceOrbCard(_ style: VoiceOrbStyle) -> some View {
+        let selected = preferences.shuffleVoiceOrbs
+            ? preferences.shuffledVoiceOrbStyles.contains(style)
+            : preferences.voiceOrbStyle == style
+
+        return Button {
+            if preferences.shuffleVoiceOrbs {
+                if selected && preferences.shuffledVoiceOrbStyles.count > 1 {
+                    preferences.shuffledVoiceOrbStyles.remove(style)
+                } else {
+                    preferences.shuffledVoiceOrbStyles.insert(style)
+                }
+            } else {
+                preferences.voiceOrbStyle = style
+            }
+        } label: {
+            VStack(spacing: 7) {
+                VoiceOrbAnimatedPreview(style: style)
+                    .frame(width: 104, height: 104)
+                HStack(spacing: 5) {
+                    Image(systemName: selected
+                          ? (preferences.shuffleVoiceOrbs ? "checkmark.circle.fill" : "circle.inset.filled")
+                          : "circle")
+                        .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    Text(style.displayName)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 0)
+                }
+            }
+            .padding(9)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(selected ? Color.accentColor.opacity(0.1) : Color.secondary.opacity(0.06))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(selected ? Color.accentColor.opacity(0.7) : Color.secondary.opacity(0.16), lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(style.displayName) voice orb")
+        .accessibilityValue(selected ? "Selected" : "Not selected")
     }
 
     @MainActor

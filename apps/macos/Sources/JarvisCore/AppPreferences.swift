@@ -11,6 +11,24 @@ public enum AppAppearance: String, Codable, Sendable, CaseIterable {
     case dark
 }
 
+public enum VoiceOrbStyle: String, Codable, Sendable, CaseIterable, Identifiable {
+    case thinking
+    case radial
+    case cloud
+    case glass
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .thinking: "Thinking Dots"
+        case .radial: "Aqua Radial"
+        case .cloud: "Cloud"
+        case .glass: "Liquid Glass"
+        }
+    }
+}
+
 public struct AppPreferences: Codable, Sendable, Equatable {
     public var speechMode: AppConfig.SpeechMode
     public var captureProfile: AppConfig.CaptureProfile
@@ -26,6 +44,9 @@ public struct AppPreferences: Codable, Sendable, Equatable {
     public var speakTypedResponses: Bool
     public var appearance: AppAppearance
     public var orbVisibility: OrbVisibility
+    public var voiceOrbStyle: VoiceOrbStyle
+    public var shuffleVoiceOrbs: Bool
+    public var shuffledVoiceOrbStyles: Set<VoiceOrbStyle>
     public var automaticallySubmitOrbAfterSilence: Bool
     public var orbSilenceDuration: Double
 
@@ -45,6 +66,9 @@ public struct AppPreferences: Codable, Sendable, Equatable {
         speakTypedResponses: Bool = false,
         appearance: AppAppearance = .system,
         orbVisibility: OrbVisibility = .duringRun,
+        voiceOrbStyle: VoiceOrbStyle = .thinking,
+        shuffleVoiceOrbs: Bool = false,
+        shuffledVoiceOrbStyles: Set<VoiceOrbStyle> = Set(VoiceOrbStyle.allCases),
         automaticallySubmitOrbAfterSilence: Bool = true,
         orbSilenceDuration: Double = 1.5
     ) {
@@ -62,6 +86,9 @@ public struct AppPreferences: Codable, Sendable, Equatable {
         self.speakTypedResponses = speakTypedResponses
         self.appearance = appearance
         self.orbVisibility = orbVisibility
+        self.voiceOrbStyle = voiceOrbStyle
+        self.shuffleVoiceOrbs = shuffleVoiceOrbs
+        self.shuffledVoiceOrbStyles = shuffledVoiceOrbStyles.isEmpty ? [voiceOrbStyle] : shuffledVoiceOrbStyles
         self.automaticallySubmitOrbAfterSilence = automaticallySubmitOrbAfterSilence
         self.orbSilenceDuration = orbSilenceDuration
     }
@@ -81,6 +108,9 @@ public struct AppPreferences: Codable, Sendable, Equatable {
         case speakTypedResponses
         case appearance
         case orbVisibility
+        case voiceOrbStyle
+        case shuffleVoiceOrbs
+        case shuffledVoiceOrbStyles
         case automaticallySubmitOrbAfterSilence
         case orbSilenceDuration
     }
@@ -102,6 +132,14 @@ public struct AppPreferences: Codable, Sendable, Equatable {
         speakTypedResponses = try container.decodeIfPresent(Bool.self, forKey: .speakTypedResponses) ?? false
         appearance = try container.decodeIfPresent(AppAppearance.self, forKey: .appearance) ?? .system
         orbVisibility = try container.decodeIfPresent(OrbVisibility.self, forKey: .orbVisibility) ?? .duringRun
+        voiceOrbStyle = try container.decodeIfPresent(VoiceOrbStyle.self, forKey: .voiceOrbStyle) ?? .thinking
+        shuffleVoiceOrbs = try container.decodeIfPresent(Bool.self, forKey: .shuffleVoiceOrbs) ?? false
+        let decodedOrbStyles = try container.decodeIfPresent(Set<VoiceOrbStyle>.self, forKey: .shuffledVoiceOrbStyles)
+        if let decodedOrbStyles, !decodedOrbStyles.isEmpty {
+            shuffledVoiceOrbStyles = decodedOrbStyles
+        } else {
+            shuffledVoiceOrbStyles = Set(VoiceOrbStyle.allCases)
+        }
         automaticallySubmitOrbAfterSilence = try container.decodeIfPresent(
             Bool.self,
             forKey: .automaticallySubmitOrbAfterSilence

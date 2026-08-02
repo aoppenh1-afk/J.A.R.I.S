@@ -140,6 +140,18 @@ private final class TestUptime: @unchecked Sendable {
     }
 }
 
+private actor ResetCounter {
+    private var count = 0
+
+    func increment() {
+        count += 1
+    }
+
+    func value() -> Int {
+        count
+    }
+}
+
 private actor SnapshotRecorder {
     private var snapshots: [VoiceSnapshot] = []
 
@@ -441,6 +453,34 @@ final class VoicePipelineTests: XCTestCase {
         XCTAssertEqual(sessionIDs[1], "initial-session")
         XCTAssertEqual(sessionIDs[2], "initial-session")
         XCTAssertNotEqual(sessionIDs[3], "initial-session")
+    }
+
+    @MainActor
+    func testSessionExpiryNotifiesConversationSessionReset() async {
+        let hermes = RecordingHermes()
+        let uptime = TestUptime()
+        let resetCount = ResetCounter()
+        let pipeline = VoicePipeline(
+            recognizer: StubRecognizer(),
+            hermes: hermes,
+            synthesizer: RecordingSynthesizer(),
+            sessionID: "initial-session",
+            conversationTimeout: 300,
+            uptime: { uptime.now() },
+            onConversationSessionReset: {
+                await resetCount.increment()
+            },
+            onSnapshot: { _ in }
+        )
+
+        await pipeline.submit(samples: [0.1])
+        let beforeExpiry = await resetCount.value()
+        XCTAssertEqual(beforeExpiry, 0)
+
+        uptime.advance(by: 301)
+        await pipeline.submit(samples: [0.1])
+        let afterExpiry = await resetCount.value()
+        XCTAssertEqual(afterExpiry, 1)
     }
 
     @MainActor

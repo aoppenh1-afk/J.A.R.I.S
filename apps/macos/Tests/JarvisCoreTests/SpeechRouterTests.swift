@@ -37,6 +37,28 @@ private actor CountingRecognizer: SpeechRecognizing {
     }
 }
 
+@MainActor
+private final class RecordingSynthesizer: SpeechSynthesizing {
+    private let shouldFail: Bool
+    private(set) var spokenContexts: [UUID] = []
+    private(set) var finishedContexts: [UUID] = []
+
+    init(shouldFail: Bool = false) {
+        self.shouldFail = shouldFail
+    }
+
+    func speak(_ text: String, contextID: UUID) async throws {
+        if shouldFail { throw RoutingStubError.failed }
+        spokenContexts.append(contextID)
+    }
+
+    func finish(contextID: UUID) async throws {
+        finishedContexts.append(contextID)
+    }
+
+    func stop(contextID: UUID?) {}
+}
+
 final class SpeechRouterTests: XCTestCase {
     func testLocalModeNeverInvokesCloudProvider() async throws {
         let local = CountingRecognizer(provider: .local)
@@ -145,5 +167,43 @@ final class SpeechRouterTests: XCTestCase {
             let cloudCounts = await cloud.counts()
             XCTAssertEqual(cloudCounts.transcribe, 0)
         }
+    }
+
+    @MainActor
+    func testCloudSpeechFinishIsForwardedToActiveProvider() async throws {
+        let local = RecordingSynthesizer()
+        let cloud = RecordingSynthesizer()
+        let router = RoutedSpeechSynthesizer(
+            mode: .cloud,
+            allowCloudFallback: false,
+            local: local,
+            cloud: cloud
+        )
+        let contextID = UUID()
+
+        try await router.speak("Hello", contextID: contextID)
+        try await router.finish(contextID: contextID)
+
+        XCTAssertTrue(local.finishedContexts.isEmpty)
+        XCTAssertEqual(cloud.finishedContexts, [contextID])
+    }
+
+    @MainActor
+    func testAutoSpeechFinishUsesTheFallbackProvider() async throws {
+        let local = RecordingSynthesizer(shouldFail: true)
+        let cloud = RecordingSynthesizer()
+        let router = RoutedSpeechSynthesizer(
+            mode: .auto,
+            allowCloudFallback: true,
+            local: local,
+            cloud: cloud
+        )
+        let contextID = UUID()
+
+        try await router.speak("Hello", contextID: contextID)
+        try await router.finish(contextID: contextID)
+
+        XCTAssertTrue(local.finishedContexts.isEmpty)
+        XCTAssertEqual(cloud.finishedContexts, [contextID])
     }
 }

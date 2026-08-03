@@ -247,6 +247,9 @@ final class AppModel: ObservableObject {
     func receive(_ nextSnapshot: VoiceSnapshot) {
         let previousState = snapshot.state
         snapshot = nextSnapshot
+        if isConversationActive(nextSnapshot.state) {
+            cancelHistoryExpiry()
+        }
         if nextSnapshot.state == .idle || nextSnapshot.state == .error || nextSnapshot.state == .degraded {
             isVoiceInteraction = false
         }
@@ -257,6 +260,11 @@ final class AppModel: ObservableObject {
               !nextSnapshot.userText.isEmpty,
               !nextSnapshot.assistantText.isEmpty,
               lastArchivedGeneration != nextSnapshot.generation else {
+            if isConversationTerminal(nextSnapshot.state),
+               isConversationActive(previousState),
+               !history.isEmpty {
+                scheduleHistoryExpiry(after: ConversationContextStore.expiration)
+            }
             return
         }
         history.append(ConversationTurn(
@@ -302,8 +310,7 @@ final class AppModel: ObservableObject {
     }
 
     func newConversation() {
-        historyExpiryTask?.cancel()
-        historyExpiryTask = nil
+        cancelHistoryExpiry()
         lastArchivedGeneration = nil
         let pipeline = pipeline
         Task { await pipeline.newConversation() }
@@ -314,8 +321,7 @@ final class AppModel: ObservableObject {
     }
 
     private func clearTranscriptHistory(resetPipeline: Bool) {
-        historyExpiryTask?.cancel()
-        historyExpiryTask = nil
+        cancelHistoryExpiry()
         history.removeAll()
         ConversationHistoryStore.clear()
         lastArchivedGeneration = nil
@@ -325,8 +331,31 @@ final class AppModel: ObservableObject {
         Task { await pipeline.newConversation() }
     }
 
-    private func scheduleHistoryExpiry(after delay: TimeInterval) {
+    private func isConversationActive(_ state: VoiceState) -> Bool {
+        switch state {
+        case .listening, .transcribing, .thinking, .tool, .approval, .speaking, .interrupting:
+            true
+        case .starting, .idle, .degraded, .error:
+            false
+        }
+    }
+
+    private func isConversationTerminal(_ state: VoiceState) -> Bool {
+        switch state {
+        case .idle, .degraded, .error:
+            true
+        case .starting, .listening, .transcribing, .thinking, .tool, .approval, .speaking, .interrupting:
+            false
+        }
+    }
+
+    private func cancelHistoryExpiry() {
         historyExpiryTask?.cancel()
+        historyExpiryTask = nil
+    }
+
+    private func scheduleHistoryExpiry(after delay: TimeInterval) {
+        cancelHistoryExpiry()
         if delay <= 0 {
             expireIdleTranscriptHistory()
             return
@@ -359,8 +388,7 @@ final class AppModel: ObservableObject {
 
     func stop() {
         recoveryTask?.cancel()
-        historyExpiryTask?.cancel()
-        historyExpiryTask = nil
+        cancelHistoryExpiry()
         connectivityMonitor?.cancel()
         capture.cancel()
         hotkey.unregister()
@@ -374,8 +402,7 @@ final class AppModel: ObservableObject {
 
     func quit() {
         recoveryTask?.cancel()
-        historyExpiryTask?.cancel()
-        historyExpiryTask = nil
+        cancelHistoryExpiry()
         connectivityMonitor?.cancel()
         capture.cancel()
         hotkey.unregister()

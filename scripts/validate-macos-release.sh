@@ -14,6 +14,9 @@ fi
 INFO_PLIST="$APP_BUNDLE/Contents/Info.plist"
 EXECUTABLE="$APP_BUNDLE/Contents/MacOS/JarvisApp"
 GLASS_ORB_RESOURCES="$APP_BUNDLE/Contents/Resources/GlassVoiceOrbStudy"
+if [[ ! -d "$GLASS_ORB_RESOURCES" ]]; then
+  GLASS_ORB_RESOURCES="$APP_BUNDLE/Contents/Resources/JarvisMac_JarvisApp.bundle/GlassVoiceOrbStudy"
+fi
 
 plutil -lint "$INFO_PLIST"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$INFO_PLIST")" = "APPL"

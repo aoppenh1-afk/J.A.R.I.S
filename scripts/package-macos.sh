@@ -24,15 +24,21 @@ swift build \
 
 BIN_PATH="$(swift build --configuration release --arch arm64 --show-bin-path --package-path "$PACKAGE_ROOT")"
 EXECUTABLE="$BIN_PATH/JarvisApp"
+RESOURCE_BUNDLE="$BIN_PATH/JarvisMac_JarvisApp.bundle"
 
 if [[ ! -x "$EXECUTABLE" ]]; then
   printf 'Release executable was not produced: %s\n' "$EXECUTABLE" >&2
+  exit 1
+fi
+if [[ ! -d "$RESOURCE_BUNDLE" ]]; then
+  printf 'Release resource bundle was not produced: %s\n' "$RESOURCE_BUNDLE" >&2
   exit 1
 fi
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 install -m 755 "$EXECUTABLE" "$APP_BUNDLE/Contents/MacOS/JarvisApp"
+ditto "$RESOURCE_BUNDLE" "$APP_BUNDLE/Contents/Resources/$(basename "$RESOURCE_BUNDLE")"
 install -m 644 "$INFO_PLIST" "$APP_BUNDLE/Contents/Info.plist"
 printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
 

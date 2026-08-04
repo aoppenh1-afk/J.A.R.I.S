@@ -13,6 +13,10 @@ fi
 
 INFO_PLIST="$APP_BUNDLE/Contents/Info.plist"
 EXECUTABLE="$APP_BUNDLE/Contents/MacOS/JarvisApp"
+GLASS_ORB_RESOURCES="$APP_BUNDLE/Contents/Resources/GlassVoiceOrbStudy"
+if [[ ! -d "$GLASS_ORB_RESOURCES" ]]; then
+  GLASS_ORB_RESOURCES="$APP_BUNDLE/Contents/Resources/JarvisMac_JarvisApp.bundle/GlassVoiceOrbStudy"
+fi
 
 plutil -lint "$INFO_PLIST"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$INFO_PLIST")" = "APPL"
@@ -23,6 +27,13 @@ if [[ ! -x "$EXECUTABLE" ]]; then
   printf 'Bundle executable is missing or not executable: %s\n' "$EXECUTABLE" >&2
   exit 1
 fi
+
+for resource in embed.html bridge.js src/renderer.js src/state.js shader-sources.js; do
+  if [[ ! -f "$GLASS_ORB_RESOURCES/$resource" ]]; then
+    printf 'Bundled Glass Voice Orb resource is missing: %s\n' "$GLASS_ORB_RESOURCES/$resource" >&2
+    exit 1
+  fi
+done
 
 ARCHITECTURES="$(lipo -archs "$EXECUTABLE")"
 if [[ "$ARCHITECTURES" != "arm64" ]]; then

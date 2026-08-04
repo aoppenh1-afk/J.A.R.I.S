@@ -25,6 +25,11 @@ targets:
     platform: macOS
     sources:
       - path: Sources/JarvisApp
+        excludes:
+          - Resources/GlassVoiceOrbStudy
+      - path: Sources/JarvisApp/Resources/GlassVoiceOrbStudy
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: JarvisPackage
         product: JarvisCore

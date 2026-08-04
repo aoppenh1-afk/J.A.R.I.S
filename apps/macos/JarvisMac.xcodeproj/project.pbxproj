@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1FEE59A0750C148DFB10CE60 /* GlassVoiceOrbStudy in Resources */ = {isa = PBXBuildFile; fileRef = 5DB736E42F1FFC496A8EED43 /* GlassVoiceOrbStudy */; };
 		2E27AFC710B44610212D7831 /* JarvisApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78909E291BDCD91604175655 /* JarvisApp.swift */; };
 		2E946FA7F67CF872C54DF6CB /* PopoverChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F6824D7A0409E46199415FD /* PopoverChrome.swift */; };
 		497A6264B3929FC3FBC69134 /* MenuBarIconTemplate@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = 2A62551113547A229E846ED0 /* MenuBarIconTemplate@2x.png */; };
@@ -14,6 +15,7 @@
 		7E7B04A2F3AAD00896A10521 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13EA4D209E2964456FA606E1 /* AppModel.swift */; };
 		836E0EE9F386AB734C159366 /* MenuBarIconTemplate.png in Resources */ = {isa = PBXBuildFile; fileRef = DD51EAEF3E6E241955CAC41F /* MenuBarIconTemplate.png */; };
 		977DDBE45BB608FEE3301B34 /* AssistantPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C742AED3E12C731997302DA /* AssistantPopover.swift */; };
+		993C255EB4ACA69908BDDC58 /* GlassVoiceOrbWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4E4FE52E382AC64EDB71C5C /* GlassVoiceOrbWebView.swift */; };
 		BB71D722650DE6F2A1C491A7 /* FloatingOrb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4141B50D0E137F3883D52C28 /* FloatingOrb.swift */; };
 		EEAE956B307A6FDC4943C629 /* JarvisCore in Frameworks */ = {isa = PBXBuildFile; productRef = 44E3476C55431B8BDD763DC2 /* JarvisCore */; };
 /* End PBXBuildFile section */
@@ -24,9 +26,11 @@
 		2A62551113547A229E846ED0 /* MenuBarIconTemplate@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "MenuBarIconTemplate@2x.png"; sourceTree = "<group>"; };
 		4141B50D0E137F3883D52C28 /* FloatingOrb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingOrb.swift; sourceTree = "<group>"; };
 		4F6824D7A0409E46199415FD /* PopoverChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PopoverChrome.swift; sourceTree = "<group>"; };
+		5DB736E42F1FFC496A8EED43 /* GlassVoiceOrbStudy */ = {isa = PBXFileReference; lastKnownFileType = folder; name = GlassVoiceOrbStudy; path = Sources/JarvisApp/Resources/GlassVoiceOrbStudy; sourceTree = SOURCE_ROOT; };
 		78909E291BDCD91604175655 /* JarvisApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JarvisApp.swift; sourceTree = "<group>"; };
 		8D20D423D2917FD0051EC878 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		9C742AED3E12C731997302DA /* AssistantPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantPopover.swift; sourceTree = "<group>"; };
+		B4E4FE52E382AC64EDB71C5C /* GlassVoiceOrbWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassVoiceOrbWebView.swift; sourceTree = "<group>"; };
 		BD38945F9ACD1286EAC6C3D8 /* JarvisNativeApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JarvisNativeApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DD51EAEF3E6E241955CAC41F /* MenuBarIconTemplate.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = MenuBarIconTemplate.png; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -57,6 +61,7 @@
 				13EA4D209E2964456FA606E1 /* AppModel.swift */,
 				9C742AED3E12C731997302DA /* AssistantPopover.swift */,
 				4141B50D0E137F3883D52C28 /* FloatingOrb.swift */,
+				B4E4FE52E382AC64EDB71C5C /* GlassVoiceOrbWebView.swift */,
 				78909E291BDCD91604175655 /* JarvisApp.swift */,
 				4F6824D7A0409E46199415FD /* PopoverChrome.swift */,
 				8D20D423D2917FD0051EC878 /* SettingsView.swift */,
@@ -76,6 +81,7 @@
 		A5BAC4C86D2E5A93A917A88B /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				5DB736E42F1FFC496A8EED43 /* GlassVoiceOrbStudy */,
 				DD51EAEF3E6E241955CAC41F /* MenuBarIconTemplate.png */,
 				2A62551113547A229E846ED0 /* MenuBarIconTemplate@2x.png */,
 			);
@@ -164,6 +170,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1FEE59A0750C148DFB10CE60 /* GlassVoiceOrbStudy in Resources */,
 				836E0EE9F386AB734C159366 /* MenuBarIconTemplate.png in Resources */,
 				497A6264B3929FC3FBC69134 /* MenuBarIconTemplate@2x.png in Resources */,
 			);
@@ -179,6 +186,7 @@
 				7E7B04A2F3AAD00896A10521 /* AppModel.swift in Sources */,
 				977DDBE45BB608FEE3301B34 /* AssistantPopover.swift in Sources */,
 				BB71D722650DE6F2A1C491A7 /* FloatingOrb.swift in Sources */,
+				993C255EB4ACA69908BDDC58 /* GlassVoiceOrbWebView.swift in Sources */,
 				2E27AFC710B44610212D7831 /* JarvisApp.swift in Sources */,
 				2E946FA7F67CF872C54DF6CB /* PopoverChrome.swift in Sources */,
 				704658620BC71844266C1CB3 /* SettingsView.swift in Sources */,

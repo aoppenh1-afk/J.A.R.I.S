@@ -2,171 +2,154 @@ import Foundation
 import XCTest
 @testable import JarvisCore
 
-private final class DeepgramTTSURLProtocol: URLProtocol, @unchecked Sendable {
-    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+@MainActor
+private final class FakeDeepgramTTSStreamingTransport: DeepgramTTSStreamingTransport {
+    private(set) var didResume = false
+    private(set) var sentMessages: [String] = []
+    private var pendingFlushResponses = 0
 
-    override class func canInit(with request: URLRequest) -> Bool { true }
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    func resume() {
+        didResume = true
+    }
 
-    override func startLoading() {
-        do {
-            guard let result = try Self.handler?(request) else { throw URLError(.badServerResponse) }
-            client?.urlProtocol(self, didReceive: result.0, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: result.1)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
+    func send(text: String) async throws {
+        sentMessages.append(text)
+        if text == #"{"type":"Flush"}"# {
+            pendingFlushResponses += 1
         }
     }
 
-    override func stopLoading() {}
+    func receive() async throws -> DeepgramTTSMessage {
+        while pendingFlushResponses == 0 {
+            await Task.yield()
+        }
+        pendingFlushResponses -= 1
+        return .text(#"{"type":"Flushed"}"#)
+    }
+
+    func cancel() {}
 }
 
-private func ttsRequestBody(_ request: URLRequest) throws -> Data {
-    if let body = request.httpBody { return body }
-    guard let stream = request.httpBodyStream else { throw URLError(.zeroByteResource) }
-    stream.open()
-    defer { stream.close() }
-    var data = Data()
-    var buffer = [UInt8](repeating: 0, count: 4_096)
-    while stream.hasBytesAvailable {
-        let count = stream.read(&buffer, maxLength: buffer.count)
-        if count < 0 { throw stream.streamError ?? URLError(.cannotDecodeRawData) }
-        if count == 0 { break }
-        data.append(contentsOf: buffer.prefix(count))
-    }
-    return data
+@MainActor
+private final class FailingDeepgramTTSStreamingTransport: DeepgramTTSStreamingTransport {
+    func resume() {}
+    func send(text: String) async throws {}
+    func receive() async throws -> DeepgramTTSMessage { throw URLError(.cannotConnectToHost) }
+    func cancel() {}
 }
 
 @MainActor
 final class DeepgramSynthesizerTests: XCTestCase {
-    override func tearDown() {
-        DeepgramTTSURLProtocol.handler = nil
-        super.tearDown()
+    func testBuildsStreamingWebSocketURL() throws {
+        let url = try DeepgramSynthesizer.streamingURL(
+            endpoint: URL(string: "https://api.deepgram.com/v1/speak")!,
+            model: "aura-2-thalia-en"
+        )
+
+        XCTAssertEqual(url.scheme, "wss")
+        XCTAssertEqual(url.host, "api.deepgram.com")
+        XCTAssertEqual(url.path, "/v1/speak")
+        XCTAssertTrue(url.absoluteString.contains("model=aura-2-thalia-en"))
+        XCTAssertTrue(url.absoluteString.contains("encoding=linear16"))
+        XCTAssertTrue(url.absoluteString.contains("sample_rate=24000"))
+        XCTAssertTrue(url.absoluteString.contains("container=none"))
+        XCTAssertFalse(url.absoluteString.contains("container=wav"))
     }
 
-    func testBuildsAuraRequestAndAcceptsWAVAudio() async throws {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [DeepgramTTSURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        DeepgramTTSURLProtocol.handler = { request in
-            XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Token secret")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
-            XCTAssertTrue(request.url?.absoluteString.contains("model=aura-2-thalia-en") == true)
-            XCTAssertTrue(request.url?.absoluteString.contains("encoding=linear16") == true)
-            XCTAssertTrue(request.url?.absoluteString.contains("container=wav") == true)
-            XCTAssertTrue(request.url?.absoluteString.contains("sample_rate=24000") == true)
-
-            let body = try ttsRequestBody(request)
-            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
-            XCTAssertEqual(payload["text"], "Hello from Jarvis.")
-            let audio = WAVEncoder.encodeMono16kPCM16(samples: [Float](repeating: 0, count: 160))
-            return (
-                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
-                audio
+    func testWaitsForPrebufferWhileTextIsStillStreaming() {
+        XCTAssertFalse(
+            DeepgramSynthesizer.shouldStartPlayback(
+                pendingFrames: 11_999,
+                isFinishing: false,
+                sentFlushCount: 1,
+                receivedFlushCount: 1
             )
-        }
-
-        let synthesizer = DeepgramSynthesizer(apiKey: "secret", session: session)
-        try await synthesizer.speak("Hello from Jarvis.", contextID: UUID())
-    }
-
-    func testMapsHTTPFailure() async {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [DeepgramTTSURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        DeepgramTTSURLProtocol.handler = { request in
-            (
-                HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!,
-                Data()
+        )
+        XCTAssertTrue(
+            DeepgramSynthesizer.shouldStartPlayback(
+                pendingFrames: 12_000,
+                isFinishing: false,
+                sentFlushCount: 1,
+                receivedFlushCount: 0
             )
-        }
+        )
+    }
 
-        let synthesizer = DeepgramSynthesizer(apiKey: "secret", session: session)
+    func testStartsShortBufferedAudioAfterStreamingFinishes() {
+        XCTAssertFalse(
+            DeepgramSynthesizer.shouldStartPlayback(
+                pendingFrames: 1,
+                isFinishing: true,
+                sentFlushCount: 1,
+                receivedFlushCount: 0
+            )
+        )
+        XCTAssertTrue(
+            DeepgramSynthesizer.shouldStartPlayback(
+                pendingFrames: 1,
+                isFinishing: true,
+                sentFlushCount: 1,
+                receivedFlushCount: 1
+            )
+        )
+    }
+
+    func testRemovesAsterisksFromSpokenText() {
+        XCTAssertEqual(
+            DeepgramSynthesizer.spokenText(from: "  This is **important**. *  "),
+            "This is important."
+        )
+    }
+
+    func testStreamsSentenceChunksOverOneConnectionAndFlushes() async throws {
+        let transport = FakeDeepgramTTSStreamingTransport()
+        var authorization: String?
+        let synthesizer = DeepgramSynthesizer(
+            apiKey: "secret",
+            transportFactory: { request in
+                authorization = request.value(forHTTPHeaderField: "Authorization")
+                return transport
+            }
+        )
+        let contextID = UUID()
+
+        try await synthesizer.speak("First sentence.", contextID: contextID)
+        try await synthesizer.speak("Second sentence.", contextID: contextID)
+        try await synthesizer.finish(contextID: contextID)
+
+        XCTAssertTrue(transport.didResume)
+        XCTAssertEqual(authorization, "Token secret")
+        XCTAssertEqual(transport.sentMessages.count, 4)
+        XCTAssertTrue(transport.sentMessages[0].contains(#""type":"Speak""#))
+        XCTAssertTrue(transport.sentMessages[0].contains(#""text":"First sentence.""#))
+        XCTAssertEqual(transport.sentMessages[1], #"{"type":"Flush"}"#)
+        XCTAssertTrue(transport.sentMessages[2].contains(#""text":"Second sentence.""#))
+        XCTAssertEqual(transport.sentMessages[3], #"{"type":"Flush"}"#)
+    }
+
+    func testPropagatesStreamingFailureWhenFinishing() async throws {
+        let synthesizer = DeepgramSynthesizer(
+            apiKey: "secret",
+            transportFactory: { _ in FailingDeepgramTTSStreamingTransport() }
+        )
+        let contextID = UUID()
+
+        try await synthesizer.speak("Hello", contextID: contextID)
         do {
-            try await synthesizer.speak("Hello", contextID: UUID())
-            XCTFail("Expected HTTP failure")
+            try await synthesizer.finish(contextID: contextID)
+            XCTFail("Expected streaming failure")
         } catch {
-            XCTAssertEqual(error as? DeepgramSpeechError, .httpStatus(503))
+            XCTAssertEqual((error as? URLError)?.code, .cannotConnectToHost)
         }
     }
 
-    func testPropagatesTimeoutWithoutRetrying() async {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [DeepgramTTSURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        var requestCount = 0
-        DeepgramTTSURLProtocol.handler = { _ in
-            requestCount += 1
-            throw URLError(.timedOut)
-        }
-
-        let synthesizer = DeepgramSynthesizer(apiKey: "secret", session: session)
-        do {
-            try await synthesizer.speak("Hello", contextID: UUID())
-            XCTFail("Expected timeout")
-        } catch {
-            XCTAssertEqual((error as? URLError)?.code, .timedOut)
-            XCTAssertEqual(requestCount, 1)
-        }
-    }
-
-    func testMissingKeyFailsBeforeNetworkRequest() async {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [DeepgramTTSURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        DeepgramTTSURLProtocol.handler = { _ in
-            XCTFail("Missing key must fail before a request")
-            throw URLError(.dataNotAllowed)
-        }
-
-        let synthesizer = DeepgramSynthesizer(apiKey: "", session: session)
+    func testMissingKeyFailsBeforeStartingTransport() async {
+        let synthesizer = DeepgramSynthesizer(apiKey: "")
         do {
             try await synthesizer.speak("Hello", contextID: UUID())
             XCTFail("Expected missing key")
         } catch {
             XCTAssertEqual(error as? DeepgramSpeechError, .missingAPIKey)
         }
-    }
-
-    func testRejectsMalformedAudio() async {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [DeepgramTTSURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        DeepgramTTSURLProtocol.handler = { request in
-            (
-                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
-                Data("not-audio".utf8)
-            )
-        }
-
-        let synthesizer = DeepgramSynthesizer(apiKey: "secret", session: session)
-        do {
-            try await synthesizer.speak("Hello", contextID: UUID())
-            XCTFail("Expected malformed audio failure")
-        } catch {
-            XCTAssertEqual(error as? DeepgramSpeechError, .audioPlaybackFailed)
-        }
-    }
-
-    func testStopCancelsMatchingPlaybackContext() async throws {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [DeepgramTTSURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        DeepgramTTSURLProtocol.handler = { request in
-            let audio = WAVEncoder.encodeMono16kPCM16(samples: [Float](repeating: 0.02, count: 16_000))
-            return (
-                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
-                audio
-            )
-        }
-
-        let synthesizer = DeepgramSynthesizer(apiKey: "secret", session: session)
-        let contextID = UUID()
-        let task = Task { try await synthesizer.speak("Long response", contextID: contextID) }
-        await Task.yield()
-        synthesizer.stop(contextID: contextID)
-        try await task.value
     }
 }

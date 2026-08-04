@@ -14,6 +14,10 @@ private final class SnapshotRelay {
     func hermesExited() {
         owner?.handleHermesUnexpectedExit()
     }
+
+    func conversationSessionReset() {
+        owner?.handleConversationSessionReset()
+    }
 }
 
 private enum AppModelError: LocalizedError {
@@ -35,10 +39,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var runtimeHealth = RuntimeHealth()
     @Published private(set) var diagnosticEvents: [DiagnosticEvent] = []
     @Published private(set) var orbVisibility: OrbVisibility
+    @Published private(set) var voiceOrbStyle: VoiceOrbStyle
+    @Published private(set) var shuffleVoiceOrbs: Bool
+    @Published private(set) var shuffledVoiceOrbStyles: Set<VoiceOrbStyle>
+    @Published private(set) var isVoiceInteraction = false
     @Published private(set) var speakTypedResponses: Bool
     @Published private(set) var automaticallySubmitOrbAfterSilence: Bool
     @Published private(set) var orbSilenceDuration: Double
-
     private enum VoiceCaptureOrigin {
         case hotkey
         case orb
@@ -72,14 +79,25 @@ final class AppModel: ObservableObject {
     private var activeCaptureOrigin: VoiceCaptureOrigin?
     private var orbSpeechDetected = false
     private var silenceSubmissionTask: Task<Void, Never>?
+    private var historyExpiryTask: Task<Void, Never>?
 
     init(config: AppConfig = AppConfig()) {
         let capture = AudioCaptureService()
         let hotkey = GlobalHotkey()
         let snapshotRelay = SnapshotRelay()
-        let runtime = Self.makeRuntime(config: config, snapshotRelay: snapshotRelay)
         let preferences = AppPreferencesStore.load()
         let persistsHistory = preferences.persistTranscriptHistory
+        let conversationContextUpdatedAt = ConversationContextStore.lastUpdatedAt()
+        let contextExpired = conversationContextUpdatedAt.map {
+            Date.now.timeIntervalSince($0) > ConversationContextStore.expiration
+        } ?? false
+        let conversationContext = ConversationContextStore.load()
+        let runtime = Self.makeRuntime(
+            config: config,
+            snapshotRelay: snapshotRelay,
+            conversationContext: conversationContext,
+            conversationContextUpdatedAt: contextExpired ? nil : conversationContextUpdatedAt
+        )
 
         self.capture = capture
         self.hotkey = hotkey
@@ -89,14 +107,29 @@ final class AppModel: ObservableObject {
         self.currentConfig = config
         self.persistsHistory = persistsHistory
         self.orbVisibility = preferences.orbVisibility
+        self.voiceOrbStyle = preferences.voiceOrbStyle
+        self.shuffleVoiceOrbs = preferences.shuffleVoiceOrbs
+        self.shuffledVoiceOrbStyles = preferences.shuffledVoiceOrbStyles
         self.speakTypedResponses = preferences.speakTypedResponses
         self.automaticallySubmitOrbAfterSilence = preferences.automaticallySubmitOrbAfterSilence
         self.orbSilenceDuration = preferences.orbSilenceDuration
-        self.history = persistsHistory ? ConversationHistoryStore.load() : []
+        if contextExpired {
+            ConversationHistoryStore.clear()
+            self.history = []
+        } else {
+            self.history = persistsHistory ? ConversationHistoryStore.load() : []
+        }
         self.hotkeyLabel = config.hotkey.displayName
         snapshotRelay.owner = self
         observeLifecycle()
         observeConnectivity()
+        if !contextExpired,
+           let conversationContextUpdatedAt,
+           !conversationContext.isEmpty || !history.isEmpty {
+            let remaining = ConversationContextStore.expiration
+                - Date.now.timeIntervalSince(conversationContextUpdatedAt)
+            scheduleHistoryExpiry(after: remaining)
+        }
 
         Task { @MainActor in
             await self.start()
@@ -136,6 +169,9 @@ final class AppModel: ObservableObject {
 
     func apply(preferences: AppPreferences) async throws {
         orbVisibility = preferences.orbVisibility
+        voiceOrbStyle = preferences.voiceOrbStyle
+        shuffleVoiceOrbs = preferences.shuffleVoiceOrbs
+        shuffledVoiceOrbStyles = preferences.shuffledVoiceOrbStyles
         speakTypedResponses = preferences.speakTypedResponses
         automaticallySubmitOrbAfterSilence = preferences.automaticallySubmitOrbAfterSilence
         orbSilenceDuration = preferences.orbSilenceDuration
@@ -154,9 +190,12 @@ final class AppModel: ObservableObject {
         let previousPipeline = pipeline
         let previousServer = hermesServer
         let reusesHermesServer = usesSameHermesServer(currentConfig, config)
+        let conversationContext = ConversationContextStore.load()
         let candidate = Self.makeRuntime(
             config: config,
             snapshotRelay: snapshotRelay,
+            conversationContext: conversationContext,
+            conversationContextUpdatedAt: ConversationContextStore.lastUpdatedAt(),
             hermesServer: reusesHermesServer ? previousServer : nil
         )
 
@@ -208,6 +247,12 @@ final class AppModel: ObservableObject {
     func receive(_ nextSnapshot: VoiceSnapshot) {
         let previousState = snapshot.state
         snapshot = nextSnapshot
+        if isConversationActive(nextSnapshot.state) {
+            cancelHistoryExpiry()
+        }
+        if nextSnapshot.state == .idle || nextSnapshot.state == .error || nextSnapshot.state == .degraded {
+            isVoiceInteraction = false
+        }
         if nextSnapshot.state == .error, previousState != .error {
             recordDiagnostic(.turnFailed)
         }
@@ -215,12 +260,18 @@ final class AppModel: ObservableObject {
               !nextSnapshot.userText.isEmpty,
               !nextSnapshot.assistantText.isEmpty,
               lastArchivedGeneration != nextSnapshot.generation else {
+            if isConversationTerminal(nextSnapshot.state),
+               isConversationActive(previousState),
+               !history.isEmpty {
+                scheduleHistoryExpiry(after: ConversationContextStore.expiration)
+            }
             return
         }
         history.append(ConversationTurn(
             userText: nextSnapshot.userText,
             assistantText: nextSnapshot.assistantText,
-            provider: nextSnapshot.speechProvider
+            provider: nextSnapshot.speechProvider,
+            sources: nextSnapshot.sources
         ))
         if history.count > ConversationHistoryStore.retentionLimit {
             history.removeFirst(history.count - ConversationHistoryStore.retentionLimit)
@@ -229,13 +280,17 @@ final class AppModel: ObservableObject {
             _ = ConversationHistoryStore.save(history)
         }
         lastArchivedGeneration = nextSnapshot.generation
+        scheduleHistoryExpiry(after: ConversationContextStore.expiration)
+    }
+
+    func handleConversationSessionReset() {
+        clearTranscriptHistory(resetPipeline: false)
     }
 
     var canSubmitText: Bool {
         started
             && !isApplyingSettings
             && !isSleeping
-            && runtimeHealth.hermes == .healthy
             && snapshot.state != .starting
             && snapshot.state != .approval
     }
@@ -247,6 +302,7 @@ final class AppModel: ObservableObject {
 
         capture.cancel()
         hotkeyDown = false
+        isVoiceInteraction = false
         let pipeline = pipeline
         let speakResponse = speakTypedResponses
         Task { await pipeline.submit(text: text, speakResponse: speakResponse) }
@@ -254,14 +310,65 @@ final class AppModel: ObservableObject {
     }
 
     func newConversation() {
+        cancelHistoryExpiry()
         lastArchivedGeneration = nil
         let pipeline = pipeline
         Task { await pipeline.newConversation() }
     }
 
     func clearHistory() {
+        clearTranscriptHistory(resetPipeline: true)
+    }
+
+    private func clearTranscriptHistory(resetPipeline: Bool) {
+        cancelHistoryExpiry()
         history.removeAll()
         ConversationHistoryStore.clear()
+        lastArchivedGeneration = nil
+        guard resetPipeline else { return }
+        ConversationContextStore.clear()
+        let pipeline = pipeline
+        Task { await pipeline.newConversation() }
+    }
+
+    private func isConversationActive(_ state: VoiceState) -> Bool {
+        switch state {
+        case .listening, .transcribing, .thinking, .tool, .approval, .speaking, .interrupting:
+            true
+        case .starting, .idle, .degraded, .error:
+            false
+        }
+    }
+
+    private func isConversationTerminal(_ state: VoiceState) -> Bool {
+        switch state {
+        case .idle, .degraded, .error:
+            true
+        case .starting, .listening, .transcribing, .thinking, .tool, .approval, .speaking, .interrupting:
+            false
+        }
+    }
+
+    private func cancelHistoryExpiry() {
+        historyExpiryTask?.cancel()
+        historyExpiryTask = nil
+    }
+
+    private func scheduleHistoryExpiry(after delay: TimeInterval) {
+        cancelHistoryExpiry()
+        if delay <= 0 {
+            expireIdleTranscriptHistory()
+            return
+        }
+        historyExpiryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.expireIdleTranscriptHistory()
+        }
+    }
+
+    private func expireIdleTranscriptHistory() {
+        clearTranscriptHistory(resetPipeline: true)
     }
 
     func openMicrophoneSettings() {
@@ -281,6 +388,7 @@ final class AppModel: ObservableObject {
 
     func stop() {
         recoveryTask?.cancel()
+        cancelHistoryExpiry()
         connectivityMonitor?.cancel()
         capture.cancel()
         hotkey.unregister()
@@ -294,6 +402,7 @@ final class AppModel: ObservableObject {
 
     func quit() {
         recoveryTask?.cancel()
+        cancelHistoryExpiry()
         connectivityMonitor?.cancel()
         capture.cancel()
         hotkey.unregister()
@@ -509,6 +618,7 @@ final class AppModel: ObservableObject {
               runtimeHealth.audio != .recovering,
               runtimeHealth.microphone == .healthy else { return }
         hotkeyDown = true
+        isVoiceInteraction = true
         activeCaptureOrigin = origin
         orbSpeechDetected = false
         silenceSubmissionTask?.cancel()
@@ -518,11 +628,11 @@ final class AppModel: ObservableObject {
             await pipeline.beginListening()
             guard hotkeyDown else { return }
             do {
-                try capture.start { [weak self] audioLevel in
+                try capture.start(onAudioSignal: { [weak self] signal in
                     Task { @MainActor in
-                        self?.receiveAudioLevel(audioLevel)
+                        self?.receiveAudioSignal(signal)
                     }
-                }
+                })
             } catch {
                 runtimeHealth.audio = .unavailable
                 recordDiagnostic(.turnFailed)
@@ -532,12 +642,16 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func receiveAudioLevel(_ audioLevel: Float) {
-        guard hotkeyDown,
-              activeCaptureOrigin == .orb,
+    private func receiveAudioSignal(_ signal: AudioCaptureSignal) {
+        guard hotkeyDown else { return }
+        // Audio bypasses @Published/SwiftUI entirely. The dedicated bridge coalesces
+        // numeric-only updates while WebGL interpolates them at display refresh rate.
+        GlassVoiceOrbAudioHub.shared.publish(signal.bands)
+
+        guard activeCaptureOrigin == .orb,
               automaticallySubmitOrbAfterSilence else { return }
         let speechThreshold = Float(currentConfig.captureProfile.silenceRMSThreshold * 1.5)
-        guard audioLevel >= speechThreshold else { return }
+        guard signal.rms >= speechThreshold else { return }
 
         orbSpeechDetected = true
         silenceSubmissionTask?.cancel()
@@ -558,6 +672,7 @@ final class AppModel: ObservableObject {
         hotkeyDown = false
         activeCaptureOrigin = nil
         orbSpeechDetected = false
+        GlassVoiceOrbAudioHub.shared.publish(.zero)
         silenceSubmissionTask?.cancel()
         silenceSubmissionTask = nil
         let samples = capture.stop()
@@ -574,6 +689,8 @@ final class AppModel: ObservableObject {
     private static func makeRuntime(
         config: AppConfig,
         snapshotRelay: SnapshotRelay,
+        conversationContext: [ConversationTurn],
+        conversationContextUpdatedAt: Date?,
         hermesServer suppliedServer: HermesServerController? = nil
     ) -> Runtime {
         let apiKey = config.hermesAPIKey ?? InstallationIdentity.hermesAPIKey()
@@ -629,7 +746,15 @@ final class AppModel: ObservableObject {
         let pipeline = VoicePipeline(
             recognizer: recognizer,
             hermes: hermes,
-            synthesizer: synthesizer
+            synthesizer: synthesizer,
+            conversationContext: conversationContext,
+            conversationContextUpdatedAt: conversationContextUpdatedAt,
+            onConversationContextChanged: { turns in
+                _ = ConversationContextStore.save(turns)
+            },
+            onConversationSessionReset: {
+                await snapshotRelay.conversationSessionReset()
+            }
         ) { snapshot in
             await snapshotRelay.deliver(snapshot)
         }

@@ -28,8 +28,12 @@ final class AppConfigTests: XCTestCase {
         }
     }
 
-    func testHermesDefaultsToLoopback() throws {
+    func testHermesDefaultsToDedicatedManagedEndpoint() throws {
         let config = AppConfig()
+
         XCTAssertNoThrow(try config.validate())
+        XCTAssertEqual(config.hermesBaseURL, HermesRuntimeConfiguration.managedBaseURL)
+        XCTAssertTrue(HermesRuntimeConfiguration.isManagedEndpoint(config.hermesBaseURL))
+        XCTAssertFalse(HermesRuntimeConfiguration.isManagedEndpoint(URL(string: "http://127.0.0.1:9000")!))
     }
 }

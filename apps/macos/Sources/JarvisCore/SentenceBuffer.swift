@@ -6,10 +6,10 @@ public struct SentenceBuffer: Sendable {
     public init() {}
 
     public mutating func append(_ delta: String) -> [String] {
-        buffered += delta
+        buffered += delta.replacingOccurrences(of: "\n", with: " ")
         var sentences: [String] = []
 
-        while let boundary = buffered.firstIndex(where: { ".!?\n".contains($0) }) {
+        while let boundary = buffered.firstIndex(where: { ".!?".contains($0) }) {
             let end = buffered.index(after: boundary)
             let sentence = String(buffered[..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
             buffered.removeSubrange(..<end)

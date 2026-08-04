@@ -27,6 +27,7 @@ private actor UnavailableRecognizer: SpeechRecognizing {
 private actor ControlledHermes: HermesServicing {
     private var continuation: AsyncThrowingStream<HermesEvent, Error>.Continuation?
     private var inputs: [String] = []
+    private var streamsStarted = 0
 
     func health() -> [String: String] { ["status": "ok"] }
     func capabilities() -> Data { Data() }
@@ -39,6 +40,7 @@ private actor ControlledHermes: HermesServicing {
     func streamEvents(runID: String) -> AsyncThrowingStream<HermesEvent, Error> {
         let (stream, continuation) = AsyncThrowingStream.makeStream(of: HermesEvent.self)
         self.continuation = continuation
+        streamsStarted += 1
         return stream
     }
 
@@ -63,6 +65,14 @@ private actor ControlledHermes: HermesServicing {
 
     func recordedInputs() -> [String] {
         inputs
+    }
+
+    func inputCount() -> Int {
+        inputs.count
+    }
+
+    func streamCount() -> Int {
+        streamsStarted
     }
 }
 
@@ -127,6 +137,18 @@ private final class TestUptime: @unchecked Sendable {
 
     func advance(by interval: TimeInterval) {
         lock.withLock { value += interval }
+    }
+}
+
+private actor ResetCounter {
+    private var count = 0
+
+    func increment() {
+        count += 1
+    }
+
+    func value() -> Int {
+        count
     }
 }
 
@@ -215,6 +237,109 @@ final class VoicePipelineTests: XCTestCase {
         await submission.value
 
         XCTAssertEqual(synthesizer.spoken, ["First sentence.", "Remaining fragment"])
+    }
+
+    @MainActor
+    func testResponseMetadataCreatesSourcesAndFollowUpsWithoutBeingSpoken() async throws {
+        let hermes = ControlledHermes()
+        let synthesizer = RecordingSynthesizer()
+        let recorder = SnapshotRecorder()
+        let pipeline = VoicePipeline(
+            recognizer: StubRecognizer(),
+            hermes: hermes,
+            synthesizer: synthesizer,
+            onSnapshot: { snapshot in await recorder.record(snapshot) }
+        )
+
+        await pipeline.prepare()
+        await pipeline.beginListening()
+        let submission = Task { await pipeline.submit(samples: [0.1]) }
+        while !(await hermes.isStreaming()) {
+            await Task.yield()
+        }
+
+        let output = """
+        Fixed it.
+        <jarvis_ui>{"follow_up_prompts":["Run the tests"],"sources":[{"path":"Sources/VoicePipeline.swift","line":184,"label":"Streaming fix"}]}</jarvis_ui>
+        """
+        await hermes.send(HermesEvent(
+            event: "message.delta",
+            runID: "run-1",
+            timestamp: 1,
+            delta: "Fixed it.\n<jar",
+            output: nil,
+            error: nil
+        ))
+        await hermes.send(HermesEvent(
+            event: "message.delta",
+            runID: "run-1",
+            timestamp: 2,
+            delta: "vis_ui>{\"follow_up_prompts\":[\"Run the tests\"],\"sources\":[{\"path\":\"Sources/VoicePipeline.swift\",\"line\":184,\"label\":\"Streaming fix\"}]}</jarvis_ui>",
+            output: nil,
+            error: nil
+        ))
+        await hermes.send(HermesEvent(
+            event: "run.completed",
+            runID: "run-1",
+            timestamp: 3,
+            output: output,
+            error: nil
+        ))
+        await hermes.finish()
+        await submission.value
+
+        let latest = await recorder.latest()
+        let snapshot = try XCTUnwrap(latest)
+        XCTAssertEqual(snapshot.assistantText, "Fixed it.")
+        XCTAssertEqual(snapshot.followUpPrompts, ["Run the tests"])
+        XCTAssertEqual(snapshot.sources, [
+            ResponseSource(path: "Sources/VoicePipeline.swift", line: 184, label: "Streaming fix")
+        ])
+        XCTAssertEqual(synthesizer.spoken, ["Fixed it."])
+    }
+
+    @MainActor
+    func testTypedFollowUpIncludesCompletedConversationContext() async {
+        let hermes = ControlledHermes()
+        let pipeline = VoicePipeline(
+            recognizer: UnavailableRecognizer(),
+            hermes: hermes,
+            synthesizer: RecordingSynthesizer(),
+            onSnapshot: { _ in }
+        )
+
+        let first = Task { await pipeline.submit(text: "What is 5 + 5?", speakResponse: false) }
+        while await hermes.streamCount() < 1 {
+            await Task.yield()
+        }
+        await hermes.send(HermesEvent(
+            event: "run.completed",
+            runID: "run-1",
+            timestamp: 1,
+            output: "10",
+            error: nil
+        ))
+        await hermes.finish()
+        await first.value
+
+        let second = Task { await pipeline.submit(text: "Now add 2.", speakResponse: false) }
+        while await hermes.streamCount() < 2 {
+            await Task.yield()
+        }
+        let inputs = await hermes.recordedInputs()
+        XCTAssertTrue(inputs[1].contains("<user>What is 5 + 5?</user>"))
+        XCTAssertTrue(inputs[1].contains("<assistant>10</assistant>"))
+        XCTAssertTrue(inputs[1].contains("<current_user_request>\nNow add 2.\n</current_user_request>"))
+
+        await hermes.send(HermesEvent(
+            event: "run.completed",
+            runID: "run-1",
+            timestamp: 2,
+            output: "12",
+            error: nil
+        ))
+        await hermes.finish()
+        await second.value
     }
 
     @MainActor
@@ -387,6 +512,34 @@ final class VoicePipelineTests: XCTestCase {
         XCTAssertEqual(sessionIDs[1], "initial-session")
         XCTAssertEqual(sessionIDs[2], "initial-session")
         XCTAssertNotEqual(sessionIDs[3], "initial-session")
+    }
+
+    @MainActor
+    func testSessionExpiryNotifiesConversationSessionReset() async {
+        let hermes = RecordingHermes()
+        let uptime = TestUptime()
+        let resetCount = ResetCounter()
+        let pipeline = VoicePipeline(
+            recognizer: StubRecognizer(),
+            hermes: hermes,
+            synthesizer: RecordingSynthesizer(),
+            sessionID: "initial-session",
+            conversationTimeout: 300,
+            uptime: { uptime.now() },
+            onConversationSessionReset: {
+                await resetCount.increment()
+            },
+            onSnapshot: { _ in }
+        )
+
+        await pipeline.submit(samples: [0.1])
+        let beforeExpiry = await resetCount.value()
+        XCTAssertEqual(beforeExpiry, 0)
+
+        uptime.advance(by: 301)
+        await pipeline.submit(samples: [0.1])
+        let afterExpiry = await resetCount.value()
+        XCTAssertEqual(afterExpiry, 1)
     }
 
     @MainActor

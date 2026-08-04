@@ -118,10 +118,16 @@ public actor RoutedSpeechRecognizer: SpeechRecognizing {
 
 @MainActor
 public final class RoutedSpeechSynthesizer: SpeechSynthesizing {
+    private enum Provider {
+        case local
+        case cloud
+    }
+
     private let local: any SpeechSynthesizing
     private let cloud: (any SpeechSynthesizing)?
     private var mode: AppConfig.SpeechMode
     private var allowCloudFallback: Bool
+    private var providersByContext: [UUID: Provider] = [:]
 
     public init(
         mode: AppConfig.SpeechMode,
@@ -144,22 +150,44 @@ public final class RoutedSpeechSynthesizer: SpeechSynthesizing {
         switch mode {
         case .local:
             try await local.speak(text, contextID: contextID)
+            providersByContext[contextID] = .local
         case .cloud:
             guard let cloud else { throw DeepgramSpeechError.missingCloudProvider }
             try await cloud.speak(text, contextID: contextID)
+            providersByContext[contextID] = .cloud
         case .auto:
             do {
                 try await local.speak(text, contextID: contextID)
+                providersByContext[contextID] = .local
             } catch {
                 guard allowCloudFallback else { throw error }
                 guard let cloud else { throw DeepgramSpeechError.missingCloudProvider }
                 try await cloud.speak(text, contextID: contextID)
+                providersByContext[contextID] = .cloud
             }
+        }
+    }
+
+    public func finish(contextID: UUID) async throws {
+        let provider = providersByContext.removeValue(forKey: contextID)
+        switch provider {
+        case .local:
+            try await local.finish(contextID: contextID)
+        case .cloud:
+            guard let cloud else { return }
+            try await cloud.finish(contextID: contextID)
+        case nil:
+            break
         }
     }
 
     public func stop(contextID: UUID?) {
         local.stop(contextID: contextID)
         cloud?.stop(contextID: contextID)
+        if let contextID {
+            providersByContext.removeValue(forKey: contextID)
+        } else {
+            providersByContext.removeAll()
+        }
     }
 }

@@ -1,0 +1,160 @@
+import Foundation
+import XCTest
+@testable import JarvisCore
+
+private final class HermesServerURLProtocol: URLProtocol, @unchecked Sendable {
+    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            guard let result = try Self.handler?(request) else {
+                throw URLError(.badServerResponse)
+            }
+            client?.urlProtocol(self, didReceive: result.0, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: result.1)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+@MainActor
+final class HermesServerControllerTests: XCTestCase {
+    override func tearDown() {
+        HermesServerURLProtocol.handler = nil
+        super.tearDown()
+    }
+
+    func testLaunchArgumentsSelectJarvisProfile() {
+        XCTAssertEqual(
+            HermesServerController.launchArguments(),
+            ["-p", "jarvis", "gateway", "run"]
+        )
+    }
+
+    func testManagedLaunchEnvironmentOverridesProfileListenerValues() {
+        let environment = HermesServerController.managedLaunchEnvironment(
+            from: [
+                "PATH": "/usr/bin",
+                "API_SERVER_ENABLED": "0",
+                "API_SERVER_HOST": "0.0.0.0",
+                "API_SERVER_PORT": "8642",
+                "API_SERVER_KEY": "stale-key",
+                "GATEWAY_MULTIPLEX_PROFILES": "1",
+            ],
+            host: "127.0.0.1",
+            port: 8643,
+            apiKey: "app-key"
+        )
+
+        XCTAssertEqual(environment["API_SERVER_ENABLED"], "1")
+        XCTAssertEqual(environment["API_SERVER_HOST"], "127.0.0.1")
+        XCTAssertEqual(environment["API_SERVER_PORT"], "8643")
+        XCTAssertEqual(environment["API_SERVER_KEY"], "app-key")
+        XCTAssertEqual(environment["GATEWAY_MULTIPLEX_PROFILES"], "0")
+    }
+
+    func testManagedEndpointRejectsPreexistingHealthResponse() async throws {
+        let session = makeSession()
+        HermesServerURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/health")
+            return (Self.response(for: request, status: 200), Data("{\"status\":\"ok\"}".utf8))
+        }
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL,
+            apiKey: "app-key",
+            executableOverride: "/definitely/not/hermes",
+            session: session
+        )
+
+        do {
+            try await controller.ensureAvailable()
+            XCTFail("Expected an occupied managed endpoint error")
+        } catch let error as HermesServerError {
+            XCTAssertEqual(error, .managedEndpointOccupied)
+        }
+    }
+
+    func testCustomEndpointRequiresAuthenticatedCompatibleCapabilities() async throws {
+        let session = makeSession()
+        HermesServerURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/capabilities")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer operator-key")
+            return (Self.response(for: request, status: 200), Self.compatibleCapabilities())
+        }
+        let controller = HermesServerController(
+            baseURL: URL(string: "http://127.0.0.1:9999")!,
+            apiKey: "operator-key",
+            executableOverride: "/definitely/not/hermes",
+            session: session
+        )
+
+        try await controller.ensureAvailable()
+        let status = await controller.processStatus()
+        XCTAssertEqual(status.totalStartCount, 0)
+        XCTAssertFalse(status.ownedProcessRunning)
+    }
+
+    func testCustomEndpointRejectsAuthenticationFailure() async throws {
+        let session = makeSession()
+        HermesServerURLProtocol.handler = { request in
+            (Self.response(for: request, status: 401), Data())
+        }
+        let controller = HermesServerController(
+            baseURL: URL(string: "http://127.0.0.1:9999")!,
+            apiKey: "wrong-key",
+            executableOverride: "/definitely/not/hermes",
+            session: session
+        )
+
+        do {
+            try await controller.ensureAvailable()
+            XCTFail("Expected the custom endpoint to be rejected")
+        } catch let error as HermesServerError {
+            XCTAssertEqual(error, .customEndpointUnavailable)
+        }
+    }
+
+    func testCapabilitiesValidatorRejectsGenericHealthPayload() {
+        XCTAssertTrue(HermesServerController.isCompatibleCapabilitiesResponse(Self.compatibleCapabilities()))
+        XCTAssertFalse(HermesServerController.isCompatibleCapabilitiesResponse(Data("{\"status\":\"ok\"}".utf8)))
+    }
+
+    private func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HermesServerURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    private static func response(for request: URLRequest, status: Int) -> HTTPURLResponse {
+        HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+    }
+
+    private static func compatibleCapabilities() -> Data {
+        Data("""
+        {
+          "object": "hermes.api_server.capabilities",
+          "endpoints": {
+            "runs": {},
+            "run_events": {},
+            "run_status": {},
+            "run_stop": {},
+            "run_approval": {}
+          },
+          "features": {
+            "run_submission": true,
+            "run_events_sse": true,
+            "run_status": true,
+            "run_stop": true,
+            "run_approval_response": true
+          }
+        }
+        """.utf8)
+    }
+}

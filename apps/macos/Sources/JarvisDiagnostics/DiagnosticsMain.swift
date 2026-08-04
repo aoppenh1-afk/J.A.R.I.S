@@ -332,7 +332,9 @@ struct JarvisDiagnostics {
         let synthesizer = DeepgramSynthesizer(apiKey: apiKey, model: preferences.deepgramTTSModel)
         let clock = ContinuousClock()
         let start = clock.now
-        try await synthesizer.speak(text, contextID: UUID())
+        let contextID = UUID()
+        try await synthesizer.speak(text, contextID: contextID)
+        try await synthesizer.finish(contextID: contextID)
         print("provider=deepgram completion_seconds=\(format(seconds(start.duration(to: clock.now))))")
     }
 

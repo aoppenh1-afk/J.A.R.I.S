@@ -41,11 +41,13 @@ The default checks do not run model inference, start Hermes, request microphone 
 
 ## Hermes runtime
 
-Hermes 0.19.0 exposes the HTTP/SSE run API through its `api_server` gateway platform. `hermes serve` is the desktop JSON-RPC/WebSocket backend and is not the endpoint J.A.R.V.I.S. uses.
+Hermes 0.20.0 exposes the HTTP/SSE run API through its `api_server` gateway platform. `hermes serve` is the desktop JSON-RPC/WebSocket backend and is not the endpoint J.A.R.V.I.S. uses.
 
-J.A.R.V.I.S. now probes the configured loopback endpoint and automatically launches `hermes gateway run` with an authenticated API server when needed. The generated bearer key is stored in macOS Keychain, passed only through the child-process environment, and shared with the native client. A healthy externally managed endpoint is reused instead of launching another process.
+J.A.R.V.I.S. uses the dedicated Hermes profile at `~/.hermes/profiles/jarvis` and owns the managed endpoint `http://127.0.0.1:8643`. When needed, the app launches `hermes -p jarvis gateway run`; it never changes Hermes's sticky active profile. The generated bearer key is stored in macOS Keychain and passed only through the child-process environment together with the managed listener host and port.
 
-Development overrides remain available through `JARVIS_HERMES_BASE_URL`, `JARVIS_HERMES_API_KEY`, and `JARVIS_HERMES_EXECUTABLE`.
+The managed endpoint is accepted only when the current app instance owns the Hermes process and authenticated `/v1/capabilities` confirms the required run/SSE/stop/approval API. A pre-existing listener on port 8643 is reported as occupied and unverified instead of being silently reused. A non-default loopback endpoint configured with `JARVIS_HERMES_BASE_URL` or in Settings is operator-managed: the app does not launch Hermes there, and the operator is responsible for ensuring it serves the `jarvis` profile. Current Hermes capability payloads authenticate API compatibility but do not attest the named profile.
+
+Development overrides remain available through `JARVIS_HERMES_BASE_URL`, `JARVIS_HERMES_API_KEY`, and `JARVIS_HERMES_EXECUTABLE`. The `jarvis` profile must not define `API_SERVER_ENABLED`, `API_SERVER_HOST`, `API_SERVER_PORT`, or `API_SERVER_KEY` in its `.env` or API-server configuration because the app-owned child environment is authoritative. See [docs/hermes-profile.md](docs/hermes-profile.md) for the profile, parity, and trust contract.
 
 ## Focused diagnostics
 

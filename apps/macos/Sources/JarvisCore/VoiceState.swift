@@ -1,5 +1,19 @@
 import Foundation
 
+public struct AudioFrequencyBands: Sendable, Equatable {
+    public var low: Float
+    public var mid: Float
+    public var high: Float
+
+    public init(low: Float = 0, mid: Float = 0, high: Float = 0) {
+        self.low = low
+        self.mid = mid
+        self.high = high
+    }
+
+    public static let zero = AudioFrequencyBands()
+}
+
 public enum VoiceState: String, Sendable, Equatable {
     case starting
     case idle
@@ -31,17 +45,20 @@ public struct ConversationTurn: Sendable, Codable, Equatable, Identifiable {
     public let userText: String
     public let assistantText: String
     public let provider: SpeechProvider?
+    public let sources: [ResponseSource]?
 
     public init(
         id: UUID = UUID(),
         userText: String,
         assistantText: String,
-        provider: SpeechProvider?
+        provider: SpeechProvider?,
+        sources: [ResponseSource]? = nil
     ) {
         self.id = id
         self.userText = userText
         self.assistantText = assistantText
         self.provider = provider
+        self.sources = sources?.isEmpty == false ? sources : nil
     }
 }
 
@@ -107,7 +124,9 @@ public struct VoiceSnapshot: Sendable, Equatable {
     public var routingStatus: SpeechRoutingStatus
     public var metrics: TurnMetrics
     public var toolActivities: [ToolActivity]
-
+    public var sources: [ResponseSource]
+    public var followUpPrompts: [String]
+    public var audioBands: AudioFrequencyBands
     public init(
         state: VoiceState = .starting,
         generation: Int = 0,
@@ -119,7 +138,10 @@ public struct VoiceSnapshot: Sendable, Equatable {
         speechProvider: SpeechProvider? = nil,
         routingStatus: SpeechRoutingStatus = SpeechRoutingStatus(),
         metrics: TurnMetrics = TurnMetrics(),
-        toolActivities: [ToolActivity] = []
+        toolActivities: [ToolActivity] = [],
+        sources: [ResponseSource] = [],
+        followUpPrompts: [String] = [],
+        audioBands: AudioFrequencyBands = .zero
     ) {
         self.state = state
         self.generation = generation
@@ -132,5 +154,8 @@ public struct VoiceSnapshot: Sendable, Equatable {
         self.routingStatus = routingStatus
         self.metrics = metrics
         self.toolActivities = toolActivities
+        self.sources = sources
+        self.followUpPrompts = followUpPrompts
+        self.audioBands = audioBands
     }
 }

@@ -10,6 +10,7 @@ public actor HermesServerController {
     private let onUnexpectedExit: ExitHandler?
     private var process: Process?
     private var restartLimiter = RestartRateLimiter(maximumStarts: 3, window: 60)
+    private let readinessTimeout: Duration
     private var intentionalStops: Set<ObjectIdentifier> = []
     private var totalStartCount = 0
     private var unexpectedExitCount = 0
@@ -20,23 +21,35 @@ public actor HermesServerController {
         apiKey: String,
         executableOverride: String? = ProcessInfo.processInfo.environment["JARVIS_HERMES_EXECUTABLE"],
         session: URLSession = .shared,
+        readinessTimeout: Duration = .seconds(60),
         onUnexpectedExit: ExitHandler? = nil
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.executableOverride = executableOverride
         self.session = session
+        self.readinessTimeout = readinessTimeout
         self.onUnexpectedExit = onUnexpectedExit
     }
 
     public func ensureAvailable() async throws {
-        if await isHealthy() { return }
         if let process, !process.isRunning {
             self.process = nil
         }
-        guard process == nil else {
-            try await waitUntilHealthy()
+        if process != nil {
+            if await isAuthenticatedReady() { return }
+            try await waitUntilReady()
             return
+        }
+
+        guard HermesRuntimeConfiguration.isManagedEndpoint(baseURL) else {
+            guard await isAuthenticatedReady() else {
+                throw HermesServerError.customEndpointUnavailable
+            }
+            return
+        }
+        guard !(await endpointResponds()) else {
+            throw HermesServerError.managedEndpointOccupied
         }
         guard baseURL.scheme == "http",
               let host = baseURL.host,
@@ -55,13 +68,13 @@ public actor HermesServerController {
 
         let process = Process()
         process.executableURL = executableURL
-        process.arguments = ["gateway", "run"]
-        var environment = ProcessInfo.processInfo.environment
-        environment["API_SERVER_ENABLED"] = "1"
-        environment["API_SERVER_HOST"] = host
-        environment["API_SERVER_PORT"] = String(port)
-        environment["API_SERVER_KEY"] = apiKey
-        process.environment = environment
+        process.arguments = Self.launchArguments()
+        process.environment = Self.managedLaunchEnvironment(
+            from: ProcessInfo.processInfo.environment,
+            host: host,
+            port: port,
+            apiKey: apiKey
+        )
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         process.terminationHandler = { [weak self] process in
@@ -77,7 +90,8 @@ public actor HermesServerController {
         totalStartCount += 1
 
         do {
-            try await waitUntilHealthy()
+            try await waitUntilReady()
+            restartLimiter.reset()
         } catch {
             stopOwnedProcess()
             throw error
@@ -109,11 +123,11 @@ public actor HermesServerController {
         onUnexpectedExit?(exitedProcess.terminationStatus)
     }
 
-    private func waitUntilHealthy() async throws {
+    private func waitUntilReady() async throws {
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(20))
+        let deadline = clock.now.advanced(by: readinessTimeout)
         while clock.now < deadline {
-            if await isHealthy() { return }
+            if await isAuthenticatedReady() { return }
             if let process, !process.isRunning {
                 self.process = nil
                 throw HermesServerError.exitedBeforeReady(process.terminationStatus)
@@ -123,13 +137,25 @@ public actor HermesServerController {
         throw HermesServerError.readinessTimedOut
     }
 
-    private func isHealthy() async -> Bool {
+    private func endpointResponds() async -> Bool {
         var request = URLRequest(url: baseURL.appending(path: "health"))
+        request.timeoutInterval = 1
+        do {
+            let (_, response) = try await session.data(for: request)
+            return response is HTTPURLResponse
+        } catch {
+            return false
+        }
+    }
+
+    private func isAuthenticatedReady() async -> Bool {
+        var request = URLRequest(url: baseURL.appending(path: "v1/capabilities"))
         request.timeoutInterval = 1
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         do {
-            let (_, response) = try await session.data(for: request)
-            return (response as? HTTPURLResponse)?.statusCode == 200
+            let (data, response) = try await session.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return false }
+            return Self.isCompatibleCapabilitiesResponse(data)
         } catch {
             return false
         }
@@ -145,6 +171,61 @@ public actor HermesServerController {
 
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
             .map(URL.init(fileURLWithPath:))
+    }
+
+    static func launchArguments() -> [String] {
+        ["-p", HermesRuntimeConfiguration.profileName, "gateway", "run"]
+    }
+
+    static func managedLaunchEnvironment(
+        from inherited: [String: String],
+        host: String,
+        port: Int,
+        apiKey: String
+    ) -> [String: String] {
+        var environment = launchEnvironment(from: inherited)
+        environment["API_SERVER_ENABLED"] = "1"
+        environment["API_SERVER_HOST"] = host
+        environment["API_SERVER_PORT"] = String(port)
+        environment["API_SERVER_KEY"] = apiKey
+        environment["GATEWAY_MULTIPLEX_PROFILES"] = "0"
+        return environment
+    }
+
+    static func isCompatibleCapabilitiesResponse(_ data: Data) -> Bool {
+        guard let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              payload["object"] as? String == "hermes.api_server.capabilities",
+              let endpoints = payload["endpoints"] as? [String: Any],
+              let features = payload["features"] as? [String: Any] else {
+            return false
+        }
+        let requiredEndpoints = ["runs", "run_events", "run_status", "run_stop", "run_approval"]
+        let requiredFeatures = [
+            "run_submission",
+            "run_events_sse",
+            "run_status",
+            "run_stop",
+            "run_approval_response",
+        ]
+        return requiredEndpoints.allSatisfy { endpoints[$0] != nil }
+            && requiredFeatures.allSatisfy { features[$0] as? Bool == true }
+    }
+
+    static func launchEnvironment(from inherited: [String: String]) -> [String: String] {
+        var environment = inherited
+        let preferredPaths = [
+            FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin").path,
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+        ]
+        let inheritedPaths = inherited["PATH"]?.split(separator: ":").map(String.init) ?? []
+        var seen = Set<String>()
+        environment["PATH"] = (preferredPaths + inheritedPaths)
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+            .joined(separator: ":")
+        return environment
     }
 
     private func stopOwnedProcess() {
@@ -180,31 +261,43 @@ public struct RestartRateLimiter: Sendable, Equatable {
         starts.append(now)
         return true
     }
+
+    public mutating func reset() {
+        starts.removeAll()
+    }
 }
 
-public enum HermesServerError: Error, Equatable, CustomStringConvertible {
+public enum HermesServerError: Error, Equatable, CustomStringConvertible, LocalizedError {
     case autoStartRequiresLoopbackHTTP
+    case customEndpointUnavailable
     case executableNotFound
     case exitedBeforeReady(Int32)
     case launchFailed(String)
+    case managedEndpointOccupied
     case missingPort
     case readinessTimedOut
     case restartRateLimited
+
+    public var errorDescription: String? { description }
 
     public var description: String {
         switch self {
         case .autoStartRequiresLoopbackHTTP:
             return "Hermes auto-start requires a loopback HTTP endpoint."
+        case .customEndpointUnavailable:
+            return "The operator-managed Hermes endpoint did not provide a compatible authenticated API."
         case .executableNotFound:
             return "Hermes is not installed in a supported location."
         case .exitedBeforeReady(let status):
             return "Hermes exited before its API became ready (status \(status))."
         case .launchFailed(let message):
             return "Unable to launch Hermes: \(message)"
+        case .managedEndpointOccupied:
+            return "The managed J.A.R.V.I.S. Hermes endpoint is already occupied by an unverified process."
         case .missingPort:
             return "The Hermes endpoint must include an explicit port."
         case .readinessTimedOut:
-            return "Hermes did not become ready within 20 seconds."
+            return "Hermes did not become ready before the startup deadline."
         case .restartRateLimited:
             return "Hermes restarted too frequently. Automatic restart is temporarily paused."
         }

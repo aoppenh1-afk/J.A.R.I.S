@@ -10,4 +10,10 @@ final class SentenceBufferTests: XCTestCase {
         XCTAssertEqual(buffer.flush(), "Fine")
         XCTAssertNil(buffer.flush())
     }
+
+    func testLineBreakDoesNotCreateASpeechBoundary() {
+        var buffer = SentenceBuffer()
+
+        XCTAssertEqual(buffer.append("First line\nsecond line."), ["First line second line."])
+    }
 }

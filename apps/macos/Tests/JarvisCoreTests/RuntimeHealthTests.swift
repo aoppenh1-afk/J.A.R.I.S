@@ -24,6 +24,42 @@ final class RuntimeHealthTests: XCTestCase {
         XCTAssertTrue(limiter.recordStartIfAllowed(now: start.addingTimeInterval(61)))
     }
 
+    func testHermesRestartLimiterResetAllowsImmediateRestart() {
+        var limiter = RestartRateLimiter(maximumStarts: 1, window: 60)
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertTrue(limiter.recordStartIfAllowed(now: now))
+        XCTAssertFalse(limiter.recordStartIfAllowed(now: now.addingTimeInterval(1)))
+
+        limiter.reset()
+
+        XCTAssertTrue(limiter.recordStartIfAllowed(now: now.addingTimeInterval(2)))
+    }
+
+    func testHermesServerErrorProvidesLocalizedDescription() {
+        XCTAssertEqual(
+            HermesServerError.restartRateLimited.localizedDescription,
+            "Hermes restarted too frequently. Automatic restart is temporarily paused."
+        )
+    }
+
+    func testHermesLaunchEnvironmentFindsUserAndHomebrewTools() {
+        let inherited = ["PATH": "/usr/bin:/opt/homebrew/bin:/custom/bin"]
+
+        let environment = HermesServerController.launchEnvironment(from: inherited)
+        let paths = environment["PATH"]?.split(separator: ":").map(String.init)
+
+        XCTAssertEqual(paths, [
+            FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin").path,
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "/usr/bin",
+            "/custom/bin",
+        ])
+    }
+
     func testRuntimeHealthStartsContentFreeAndUnknown() {
         let health = RuntimeHealth()
 

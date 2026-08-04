@@ -6,6 +6,7 @@ struct AssistantPopover: View {
     @ObservedObject var model: AppModel
     @Environment(\.openSettings) private var openSettings
     @State private var draft = ""
+    @State private var composerHeight: CGFloat = 40
 
     var body: some View {
         VStack(spacing: 14) {
@@ -184,13 +185,21 @@ struct AssistantPopover: View {
 
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            TextField("Message J.A.R.V.I.S.", text: $draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(1...4)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .onSubmit(sendMessage)
+            ZStack(alignment: .topLeading) {
+                PromptTextView(text: $draft, height: $composerHeight, onSubmit: sendMessage)
+                    .frame(height: composerHeight)
+
+                if draft.isEmpty {
+                    Text("Message J.A.R.V.I.S.")
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 11)
+                        .allowsHitTesting(false)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             Button(action: sendMessage) {
                 Image(systemName: "arrow.up")
                     .font(.body.weight(.bold))
@@ -333,6 +342,132 @@ struct AssistantPopover: View {
         case .error, .degraded: .red
         case .starting: .gray
         }
+    }
+}
+
+private struct PromptTextView: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var height: CGFloat
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> PromptScrollView {
+        let scrollView = PromptScrollView()
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+
+        let textView = PromptNativeTextView()
+        textView.delegate = context.coordinator
+        textView.onSubmit = onSubmit
+        textView.string = text
+        textView.font = .systemFont(ofSize: NSFont.systemFontSize)
+        textView.textColor = .labelColor
+        textView.insertionPointColor = .controlAccentColor
+        textView.drawsBackground = false
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainerInset = NSSize(width: 7, height: 8)
+        textView.textContainer?.lineFragmentPadding = 5
+        textView.textContainer?.widthTracksTextView = true
+        textView.minSize = NSSize(width: 0, height: 40)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        scrollView.documentView = textView
+        context.coordinator.scrollView = scrollView
+        scrollView.onLayout = { [weak coordinator = context.coordinator] in
+            coordinator?.updateHeight()
+        }
+        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
+            coordinator?.updateHeight()
+        }
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: PromptScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let textView = scrollView.documentView as? PromptNativeTextView else { return }
+        textView.onSubmit = onSubmit
+        if textView.string != text {
+            textView.string = text
+        }
+        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
+            coordinator?.updateHeight()
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: PromptTextView
+        weak var scrollView: PromptScrollView?
+
+        init(parent: PromptTextView) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            parent.text = textView.string
+            updateHeight()
+        }
+
+        func updateHeight() {
+            guard let scrollView,
+                  let textView = scrollView.documentView as? NSTextView,
+                  let textContainer = textView.textContainer,
+                  let layoutManager = textView.layoutManager else { return }
+
+            let width = scrollView.contentSize.width
+            guard width > 0 else { return }
+            textContainer.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+            layoutManager.ensureLayout(for: textContainer)
+
+            let measuredHeight = ceil(
+                layoutManager.usedRect(for: textContainer).height + (textView.textContainerInset.height * 2)
+            )
+            let contentHeight = max(40, measuredHeight)
+            let targetHeight = min(contentHeight, 96)
+            textView.frame = NSRect(x: 0, y: 0, width: width, height: contentHeight)
+            scrollView.hasVerticalScroller = contentHeight > 96
+
+            guard abs(parent.height - targetHeight) > 0.5 else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.parent.height = targetHeight
+            }
+        }
+    }
+}
+
+private final class PromptScrollView: NSScrollView {
+    var onLayout: (() -> Void)?
+
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+}
+
+private final class PromptNativeTextView: NSTextView {
+    var onSubmit: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36, !event.modifierFlags.contains(.shift) {
+            onSubmit?()
+            return
+        }
+        super.keyDown(with: event)
     }
 }
 

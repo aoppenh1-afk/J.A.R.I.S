@@ -189,6 +189,11 @@ struct SettingsView: View {
 
             Section("Hermes") {
                 TextField("Loopback endpoint", text: $preferences.hermesBaseURL)
+                Text(preferences.hermesBaseURL == HermesRuntimeConfiguration.managedBaseURL.absoluteString
+                     ? "Managed J.A.R.V.I.S. profile on the dedicated local endpoint."
+                     : "Custom endpoints are operator-managed and must serve the jarvis profile with a compatible authenticated API.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Transcript history") {

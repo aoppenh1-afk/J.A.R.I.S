@@ -61,7 +61,7 @@ public struct AppPreferences: Codable, Sendable, Equatable {
         macVoiceIdentifier: String? = MacSpeechVoice.jamiePremiumIdentifier,
         deepgramSTTModel: String = "nova-3",
         deepgramTTSModel: String = "aura-2-thalia-en",
-        hermesBaseURL: String = "http://127.0.0.1:8642",
+        hermesBaseURL: String = HermesRuntimeConfiguration.managedBaseURL.absoluteString,
         persistTranscriptHistory: Bool = false,
         speakTypedResponses: Bool = false,
         appearance: AppAppearance = .system,
@@ -127,7 +127,10 @@ public struct AppPreferences: Codable, Sendable, Equatable {
             ?? MacSpeechVoice.jamiePremiumIdentifier
         deepgramSTTModel = try container.decode(String.self, forKey: .deepgramSTTModel)
         deepgramTTSModel = try container.decode(String.self, forKey: .deepgramTTSModel)
-        hermesBaseURL = try container.decode(String.self, forKey: .hermesBaseURL)
+        let decodedHermesBaseURL = try container.decode(String.self, forKey: .hermesBaseURL)
+        hermesBaseURL = decodedHermesBaseURL == HermesRuntimeConfiguration.legacyManagedBaseURL.absoluteString
+            ? HermesRuntimeConfiguration.managedBaseURL.absoluteString
+            : decodedHermesBaseURL
         persistTranscriptHistory = try container.decodeIfPresent(Bool.self, forKey: .persistTranscriptHistory) ?? false
         speakTypedResponses = try container.decodeIfPresent(Bool.self, forKey: .speakTypedResponses) ?? false
         appearance = try container.decodeIfPresent(AppAppearance.self, forKey: .appearance) ?? .system
@@ -159,7 +162,7 @@ public struct AppPreferences: Codable, Sendable, Equatable {
             deepgramAPIKey: InstallationIdentity.deepgramAPIKey(),
             deepgramSTTModel: deepgramSTTModel,
             deepgramTTSModel: deepgramTTSModel,
-            hermesBaseURL: URL(string: hermesBaseURL) ?? URL(string: "http://127.0.0.1:8642")!
+            hermesBaseURL: URL(string: hermesBaseURL) ?? HermesRuntimeConfiguration.managedBaseURL
         )
     }
 }
@@ -171,6 +174,10 @@ public enum AppPreferencesStore {
         guard let data = defaults.data(forKey: key),
               let preferences = try? JSONDecoder().decode(AppPreferences.self, from: data) else {
             return AppPreferences()
+        }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           object["hermesBaseURL"] as? String == HermesRuntimeConfiguration.legacyManagedBaseURL.absoluteString {
+            _ = save(preferences, defaults: defaults)
         }
         return preferences
     }

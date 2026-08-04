@@ -1,5 +1,23 @@
 import Foundation
 
+public enum HermesRuntimeConfiguration {
+    public static let profileName = "jarvis"
+    public static let legacyManagedBaseURL = URL(string: "http://127.0.0.1:8642")!
+    public static let managedBaseURL = URL(string: "http://127.0.0.1:8643")!
+
+    public static func isManagedEndpoint(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        return components.scheme == "http"
+            && components.host == "127.0.0.1"
+            && components.port == 8643
+            && (components.path.isEmpty || components.path == "/")
+            && components.user == nil
+            && components.password == nil
+            && components.query == nil
+            && components.fragment == nil
+    }
+}
+
 public struct AppConfig: Sendable, Equatable {
     public enum SpeechMode: String, Sendable, Codable {
         case local
@@ -47,9 +65,9 @@ public struct AppConfig: Sendable, Equatable {
         deepgramAPIKey: String? = InstallationIdentity.deepgramAPIKey(),
         deepgramSTTModel: String = "nova-3",
         deepgramTTSModel: String = "aura-2-thalia-en",
-        hermesBaseURL: URL = URL(
-            string: ProcessInfo.processInfo.environment["JARVIS_HERMES_BASE_URL"] ?? "http://127.0.0.1:8642"
-        )!,
+        hermesBaseURL: URL = ProcessInfo.processInfo.environment["JARVIS_HERMES_BASE_URL"]
+            .flatMap(URL.init(string:))
+            ?? HermesRuntimeConfiguration.managedBaseURL,
         hermesAPIKey: String? = ProcessInfo.processInfo.environment["JARVIS_HERMES_API_KEY"]
             ?? InstallationIdentity.hermesAPIKey(),
         hermesSessionKey: String = InstallationIdentity.hermesSessionKey()

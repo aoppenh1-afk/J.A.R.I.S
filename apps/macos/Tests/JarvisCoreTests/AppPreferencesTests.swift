@@ -27,6 +27,17 @@ final class AppPreferencesTests: XCTestCase {
         defaults.removePersistentDomain(forName: suiteName)
     }
 
+    func testDefaultsToDedicatedHermesEndpoint() {
+        XCTAssertEqual(
+            AppPreferences().hermesBaseURL,
+            HermesRuntimeConfiguration.managedBaseURL.absoluteString
+        )
+        XCTAssertEqual(
+            AppPreferences().makeConfig().hermesBaseURL,
+            HermesRuntimeConfiguration.managedBaseURL
+        )
+    }
+
     func testDefaultsToJamiePremiumVoice() {
         XCTAssertEqual(
             AppPreferences().macVoiceIdentifier,
@@ -36,6 +47,43 @@ final class AppPreferencesTests: XCTestCase {
             AppPreferences().makeConfig().macVoiceIdentifier,
             MacSpeechVoice.jamiePremiumIdentifier
         )
+    }
+
+    func testMigratesExactLegacyHermesEndpoint() throws {
+        let encoded = try JSONEncoder().encode(AppPreferences(
+            hermesBaseURL: HermesRuntimeConfiguration.legacyManagedBaseURL.absoluteString
+        ))
+
+        let decoded = try JSONDecoder().decode(AppPreferences.self, from: encoded)
+
+        XCTAssertEqual(decoded.hermesBaseURL, HermesRuntimeConfiguration.managedBaseURL.absoluteString)
+    }
+
+    func testPersistsLegacyHermesEndpointMigration() throws {
+        let suiteName = "JarvisCoreTests.LegacyHermesEndpoint"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let legacy = AppPreferences(
+            hermesBaseURL: HermesRuntimeConfiguration.legacyManagedBaseURL.absoluteString
+        )
+        defaults.set(try JSONEncoder().encode(legacy), forKey: "jarvis.appPreferences.v1")
+
+        let loaded = AppPreferencesStore.load(defaults: defaults)
+        let persistedData = try XCTUnwrap(defaults.data(forKey: "jarvis.appPreferences.v1"))
+        let persisted = try JSONDecoder().decode(AppPreferences.self, from: persistedData)
+
+        XCTAssertEqual(loaded.hermesBaseURL, HermesRuntimeConfiguration.managedBaseURL.absoluteString)
+        XCTAssertEqual(persisted.hermesBaseURL, HermesRuntimeConfiguration.managedBaseURL.absoluteString)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    func testPreservesCustomHermesEndpoint() throws {
+        let customURL = "http://127.0.0.1:9000"
+        let encoded = try JSONEncoder().encode(AppPreferences(hermesBaseURL: customURL))
+
+        let decoded = try JSONDecoder().decode(AppPreferences.self, from: encoded)
+
+        XCTAssertEqual(decoded.hermesBaseURL, customURL)
     }
 
     func testMigratesMissingVoiceToJamiePremium() throws {

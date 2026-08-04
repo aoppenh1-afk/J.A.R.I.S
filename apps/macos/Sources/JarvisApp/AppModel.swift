@@ -270,7 +270,8 @@ final class AppModel: ObservableObject {
         history.append(ConversationTurn(
             userText: nextSnapshot.userText,
             assistantText: nextSnapshot.assistantText,
-            provider: nextSnapshot.speechProvider
+            provider: nextSnapshot.speechProvider,
+            sources: nextSnapshot.sources
         ))
         if history.count > ConversationHistoryStore.retentionLimit {
             history.removeFirst(history.count - ConversationHistoryStore.retentionLimit)
@@ -290,7 +291,6 @@ final class AppModel: ObservableObject {
         started
             && !isApplyingSettings
             && !isSleeping
-            && runtimeHealth.hermes == .healthy
             && snapshot.state != .starting
             && snapshot.state != .approval
     }

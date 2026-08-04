@@ -62,6 +62,9 @@ final class HermesClientTests: XCTestCase {
             XCTAssertEqual(payload["session_id"], "browser-test")
             XCTAssertTrue(payload["instructions"]?.contains("/usr/bin/open") == true)
             XCTAssertTrue(payload["instructions"]?.contains("browser_navigate") == true)
+            XCTAssertTrue(payload["instructions"]?.contains("<jarvis_ui>") == true)
+            XCTAssertTrue(payload["instructions"]?.contains("follow_up_prompts") == true)
+            XCTAssertTrue(payload["instructions"]?.contains("changed file") == true)
             return (
                 HTTPURLResponse(
                     url: request.url!,

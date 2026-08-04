@@ -81,6 +81,8 @@ public actor VoicePipeline {
             $0.routingStatus = SpeechRoutingStatus()
             $0.metrics = TurnMetrics(interruptionMilliseconds: interruptionMilliseconds)
             $0.toolActivities = []
+            $0.sources = []
+            $0.followUpPrompts = []
         }
     }
 
@@ -148,6 +150,8 @@ public actor VoicePipeline {
             $0.routingStatus = SpeechRoutingStatus()
             $0.metrics = TurnMetrics(interruptionMilliseconds: interruptionMilliseconds)
             $0.toolActivities = []
+            $0.sources = []
+            $0.followUpPrompts = []
         }
 
         do {
@@ -196,36 +200,46 @@ public actor VoicePipeline {
 
         let stream = try await hermes.streamEvents(runID: run.runID)
         var sentenceBuffer = SentenceBuffer()
+        var responseFilter = HermesResponseStreamFilter()
+        var rawAssistantText = ""
         var receivedDelta = false
         var terminalEvent: String?
+        var terminalOutput: String?
 
         for try await event in stream {
             guard gate.accepts(runID: event.runID, generation: active.value) else { continue }
             if event.event == "message.delta", let delta = event.delta {
                 let isFirstDelta = !receivedDelta
                 receivedDelta = true
-                await publish {
-                    $0.assistantText += delta
-                    if isFirstDelta {
+                rawAssistantText += delta
+                let visibleDelta = responseFilter.append(delta)
+                if isFirstDelta {
+                    await publish {
                         $0.metrics.hermesFirstDeltaMilliseconds = hermesStart.duration(to: clock.now).milliseconds
                     }
                 }
-                if speakResponse {
-                    let sentences = sentenceBuffer.append(delta)
-                    for sentence in sentences {
-                        speechContinuation?.yield(sentence)
-                    }
-                    if !sentences.isEmpty {
-                        await publish {
-                            if $0.metrics.ttsQueuedMilliseconds == nil {
-                                $0.metrics.ttsQueuedMilliseconds = hermesStart.duration(to: clock.now).milliseconds
+                if !visibleDelta.isEmpty {
+                    await publish { $0.assistantText += visibleDelta }
+                    if speakResponse {
+                        let sentences = sentenceBuffer.append(visibleDelta)
+                        for sentence in sentences {
+                            speechContinuation?.yield(sentence)
+                        }
+                        if !sentences.isEmpty {
+                            await publish {
+                                if $0.metrics.ttsQueuedMilliseconds == nil {
+                                    $0.metrics.ttsQueuedMilliseconds = hermesStart.duration(to: clock.now).milliseconds
+                                }
+                                $0.state = .speaking
+                                $0.statusText = "Speaking while Hermes responds"
                             }
-                            $0.state = .speaking
-                            $0.statusText = "Speaking while Hermes responds"
                         }
                     }
                 }
             } else {
+                if event.event == "run.completed" {
+                    terminalOutput = event.output
+                }
                 await handleLifecycle(event)
             }
             if event.isTerminal {
@@ -244,9 +258,7 @@ public actor VoicePipeline {
                 throw HermesClientError.streamClosedWithoutTerminalEvent
             }
             terminalEvent = "run.completed"
-            if let output = reconciled.output, !output.isEmpty {
-                await publish { $0.assistantText = output }
-            }
+            terminalOutput = reconciled.output
         }
 
         guard terminalEvent == "run.completed" else {
@@ -254,6 +266,25 @@ public actor VoicePipeline {
             snapshot.activeRunID = nil
             await stopSpeech()
             return
+        }
+
+        let visibleTail = responseFilter.finish()
+        if !visibleTail.isEmpty {
+            await publish { $0.assistantText += visibleTail }
+            if speakResponse {
+                for sentence in sentenceBuffer.append(visibleTail) {
+                    speechContinuation?.yield(sentence)
+                }
+            }
+        }
+
+        let rawFinalOutput = terminalOutput.flatMap { $0.isEmpty ? nil : $0 }
+            ?? rawAssistantText
+        let presentation = HermesResponsePresentationParser.parse(rawFinalOutput)
+        await publish {
+            $0.assistantText = presentation.text
+            $0.sources = presentation.sources
+            $0.followUpPrompts = presentation.followUpPrompts
         }
 
         recordCompletedTurn(userText: text)
@@ -264,8 +295,7 @@ public actor VoicePipeline {
             if let remainder = sentenceBuffer.flush() {
                 speechContinuation?.yield(remainder)
             } else if !receivedDelta {
-                let finalOutput = snapshot.assistantText.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !finalOutput.isEmpty { speechContinuation?.yield(finalOutput) }
+                if !presentation.text.isEmpty { speechContinuation?.yield(presentation.text) }
             }
         }
 
@@ -305,7 +335,8 @@ public actor VoicePipeline {
         conversationContext.append(ConversationTurn(
             userText: userText,
             assistantText: assistantText,
-            provider: snapshot.speechProvider
+            provider: snapshot.speechProvider,
+            sources: snapshot.sources
         ))
     }
 
@@ -466,9 +497,7 @@ public actor VoicePipeline {
                 $0.statusText = "Hermes is continuing"
             }
         case "run.completed":
-            if let output = event.output, !output.isEmpty {
-                await publish { $0.assistantText = output }
-            }
+            break
         case "run.failed":
             await publish {
                 $0.state = .error

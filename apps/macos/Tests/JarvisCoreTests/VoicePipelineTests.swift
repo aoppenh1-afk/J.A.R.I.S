@@ -240,6 +240,65 @@ final class VoicePipelineTests: XCTestCase {
     }
 
     @MainActor
+    func testResponseMetadataCreatesSourcesAndFollowUpsWithoutBeingSpoken() async throws {
+        let hermes = ControlledHermes()
+        let synthesizer = RecordingSynthesizer()
+        let recorder = SnapshotRecorder()
+        let pipeline = VoicePipeline(
+            recognizer: StubRecognizer(),
+            hermes: hermes,
+            synthesizer: synthesizer,
+            onSnapshot: { snapshot in await recorder.record(snapshot) }
+        )
+
+        await pipeline.prepare()
+        await pipeline.beginListening()
+        let submission = Task { await pipeline.submit(samples: [0.1]) }
+        while !(await hermes.isStreaming()) {
+            await Task.yield()
+        }
+
+        let output = """
+        Fixed it.
+        <jarvis_ui>{"follow_up_prompts":["Run the tests"],"sources":[{"path":"Sources/VoicePipeline.swift","line":184,"label":"Streaming fix"}]}</jarvis_ui>
+        """
+        await hermes.send(HermesEvent(
+            event: "message.delta",
+            runID: "run-1",
+            timestamp: 1,
+            delta: "Fixed it.\n<jar",
+            output: nil,
+            error: nil
+        ))
+        await hermes.send(HermesEvent(
+            event: "message.delta",
+            runID: "run-1",
+            timestamp: 2,
+            delta: "vis_ui>{\"follow_up_prompts\":[\"Run the tests\"],\"sources\":[{\"path\":\"Sources/VoicePipeline.swift\",\"line\":184,\"label\":\"Streaming fix\"}]}</jarvis_ui>",
+            output: nil,
+            error: nil
+        ))
+        await hermes.send(HermesEvent(
+            event: "run.completed",
+            runID: "run-1",
+            timestamp: 3,
+            output: output,
+            error: nil
+        ))
+        await hermes.finish()
+        await submission.value
+
+        let latest = await recorder.latest()
+        let snapshot = try XCTUnwrap(latest)
+        XCTAssertEqual(snapshot.assistantText, "Fixed it.")
+        XCTAssertEqual(snapshot.followUpPrompts, ["Run the tests"])
+        XCTAssertEqual(snapshot.sources, [
+            ResponseSource(path: "Sources/VoicePipeline.swift", line: 184, label: "Streaming fix")
+        ])
+        XCTAssertEqual(synthesizer.spoken, ["Fixed it."])
+    }
+
+    @MainActor
     func testTypedFollowUpIncludesCompletedConversationContext() async {
         let hermes = ControlledHermes()
         let pipeline = VoicePipeline(

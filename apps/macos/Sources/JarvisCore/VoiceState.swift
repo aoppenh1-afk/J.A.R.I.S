@@ -45,17 +45,20 @@ public struct ConversationTurn: Sendable, Codable, Equatable, Identifiable {
     public let userText: String
     public let assistantText: String
     public let provider: SpeechProvider?
+    public let sources: [ResponseSource]?
 
     public init(
         id: UUID = UUID(),
         userText: String,
         assistantText: String,
-        provider: SpeechProvider?
+        provider: SpeechProvider?,
+        sources: [ResponseSource]? = nil
     ) {
         self.id = id
         self.userText = userText
         self.assistantText = assistantText
         self.provider = provider
+        self.sources = sources?.isEmpty == false ? sources : nil
     }
 }
 
@@ -121,6 +124,8 @@ public struct VoiceSnapshot: Sendable, Equatable {
     public var routingStatus: SpeechRoutingStatus
     public var metrics: TurnMetrics
     public var toolActivities: [ToolActivity]
+    public var sources: [ResponseSource]
+    public var followUpPrompts: [String]
     public var audioBands: AudioFrequencyBands
     public init(
         state: VoiceState = .starting,
@@ -134,6 +139,8 @@ public struct VoiceSnapshot: Sendable, Equatable {
         routingStatus: SpeechRoutingStatus = SpeechRoutingStatus(),
         metrics: TurnMetrics = TurnMetrics(),
         toolActivities: [ToolActivity] = [],
+        sources: [ResponseSource] = [],
+        followUpPrompts: [String] = [],
         audioBands: AudioFrequencyBands = .zero
     ) {
         self.state = state
@@ -147,6 +154,8 @@ public struct VoiceSnapshot: Sendable, Equatable {
         self.routingStatus = routingStatus
         self.metrics = metrics
         self.toolActivities = toolActivities
+        self.sources = sources
+        self.followUpPrompts = followUpPrompts
         self.audioBands = audioBands
     }
 }

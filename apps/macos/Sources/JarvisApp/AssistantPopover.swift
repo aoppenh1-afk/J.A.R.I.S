@@ -733,11 +733,9 @@ private struct PromptTextView: NSViewRepresentable {
         scrollView.documentView = textView
         context.coordinator.scrollView = scrollView
         scrollView.onLayout = { [weak coordinator = context.coordinator] in
-            coordinator?.updateHeight()
+            coordinator?.scheduleHeightUpdate()
         }
-        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
-            coordinator?.updateHeight()
-        }
+        context.coordinator.scheduleHeightUpdate()
         return scrollView
     }
 
@@ -750,14 +748,13 @@ private struct PromptTextView: NSViewRepresentable {
             textView.string = text
         }
         textView.needsDisplay = true
-        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
-            coordinator?.updateHeight()
-        }
+        context.coordinator.scheduleHeightUpdate()
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: PromptTextView
         weak var scrollView: PromptScrollView?
+        private var isHeightUpdateScheduled = false
 
         init(parent: PromptTextView) {
             self.parent = parent
@@ -767,10 +764,20 @@ private struct PromptTextView: NSViewRepresentable {
             guard let textView = notification.object as? PromptNativeTextView else { return }
             parent.text = textView.string
             textView.needsDisplay = true
-            updateHeight()
+            scheduleHeightUpdate()
         }
 
-        func updateHeight() {
+        func scheduleHeightUpdate() {
+            guard !isHeightUpdateScheduled else { return }
+            isHeightUpdateScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isHeightUpdateScheduled = false
+                self.updateHeight()
+            }
+        }
+
+        private func updateHeight() {
             guard let scrollView,
                   let textView = scrollView.documentView as? NSTextView,
                   let textContainer = textView.textContainer,
@@ -786,13 +793,18 @@ private struct PromptTextView: NSViewRepresentable {
             )
             let contentHeight = max(36, measuredHeight)
             let targetHeight = min(contentHeight, 80)
-            textView.frame = NSRect(x: 0, y: 0, width: width, height: contentHeight)
-            scrollView.hasVerticalScroller = contentHeight > 80
+            let targetFrame = NSRect(x: 0, y: 0, width: width, height: contentHeight)
+            if textView.frame != targetFrame {
+                textView.frame = targetFrame
+            }
+
+            let needsVerticalScroller = contentHeight > 80
+            if scrollView.hasVerticalScroller != needsVerticalScroller {
+                scrollView.hasVerticalScroller = needsVerticalScroller
+            }
 
             guard abs(parent.height - targetHeight) > 0.5 else { return }
-            DispatchQueue.main.async { [weak self] in
-                self?.parent.height = targetHeight
-            }
+            parent.height = targetHeight
         }
     }
 }

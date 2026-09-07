@@ -289,10 +289,11 @@ public final class DeepgramSynthesizer: SpeechSynthesizing {
         guard activeContextID == contextID else { return }
         pendingBuffers = max(0, pendingBuffers - 1)
         pendingFrames = frameCount >= pendingFrames ? 0 : pendingFrames - frameCount
-        if pendingBuffers == 0, !isFinishing {
-            playerNode?.pause()
-            playbackStarted = false
-        }
+        // Do not pause on underrun while streaming. AVAudioPlayerNode outputs
+        // silence when its queue is empty and resumes seamlessly when the next
+        // buffer is scheduled. Pausing here and re-requiring a 0.5s prebuffer
+        // caused repeated gaps/clicks on long responses where TTS production
+        // lags playback until finish() disables the pause path.
         finishIfDrained()
     }
 

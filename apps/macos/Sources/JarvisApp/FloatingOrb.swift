@@ -24,7 +24,9 @@ final class FloatingOrbWindowController {
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        let hostingView = NSHostingView(rootView: FloatingOrbView(model: model).background(Color.clear))
+        let hostingView = NSHostingView(rootView: FloatingOrbView(model: model, onDrag: { [weak self] delta in
+            self?.movePanel(by: delta)
+        }).background(Color.clear))
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.isOpaque = false
@@ -57,6 +59,20 @@ final class FloatingOrbWindowController {
             visibility: model.orbVisibility,
             isVoiceInteraction: model.isVoiceInteraction
         )
+    }
+
+    func movePanel(by delta: CGSize) {
+        guard delta != .zero else { return }
+        var origin = panel.frame.origin
+        origin.x += delta.width
+        origin.y -= delta.height
+        if let visibleFrame = (panel.screen ?? NSScreen.main)?.visibleFrame {
+            let size = panel.frame.size
+            let grabHeight: CGFloat = 48
+            origin.x = min(max(origin.x, visibleFrame.minX - size.width + grabHeight), visibleFrame.maxX - grabHeight)
+            origin.y = min(max(origin.y, visibleFrame.minY - size.height + grabHeight), visibleFrame.maxY - grabHeight)
+        }
+        panel.setFrameOrigin(origin)
     }
 
     private func resizePanel(for snapshot: VoiceSnapshot) {
@@ -140,6 +156,8 @@ private struct FloatingOrbView: View {
     @ObservedObject var model: AppModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var shuffleReferenceTime = Date.now.timeIntervalSinceReferenceDate
+    @State private var lastDragTranslation: CGSize = .zero
+    let onDrag: (CGSize) -> Void
 
     var body: some View {
         let style = VoiceOrbStyle.resolve(
@@ -175,6 +193,21 @@ private struct FloatingOrbView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 4)
+                .onChanged { value in
+                    let translation = CGSize(width: value.translation.width, height: value.translation.height)
+                    let delta = CGSize(
+                        width: translation.width - lastDragTranslation.width,
+                        height: translation.height - lastDragTranslation.height
+                    )
+                    lastDragTranslation = translation
+                    onDrag(delta)
+                }
+                .onEnded { _ in
+                    lastDragTranslation = .zero
+                }
+        )
         .onTapGesture {
             model.toggleVoiceInteraction()
         }

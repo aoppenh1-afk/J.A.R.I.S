@@ -33,7 +33,9 @@ struct JarvisApp: App {
         _model = StateObject(wrappedValue: model)
         _appearance = State(initialValue: preferences.appearance)
         self.orbWindowController = orbWindowController
+        let initialAppearance = preferences.appearance
         DispatchQueue.main.async {
+            JarvisTheme.applyAppearance(initialAppearance)
             orbWindowController.start()
         }
     }
@@ -42,6 +44,10 @@ struct JarvisApp: App {
         MenuBarExtra {
             AssistantPopover(model: model)
                 .jarvisMenuBarPanelStyle(appearance: appearance)
+                .onAppear { JarvisTheme.applyAppearance(appearance) }
+                .onChange(of: appearance) { _, next in
+                    JarvisTheme.applyAppearance(next)
+                }
         } label: {
             Image(nsImage: Self.menuBarIcon)
         }
@@ -50,9 +56,14 @@ struct JarvisApp: App {
         Settings {
             SettingsView { preferences in
                 appearance = preferences.appearance
+                JarvisTheme.applyAppearance(preferences.appearance)
                 try await model.apply(preferences: preferences)
             }
             .preferredColorScheme(appearance.colorScheme)
+            .onAppear { JarvisTheme.applyAppearance(appearance) }
+            .onChange(of: appearance) { _, next in
+                JarvisTheme.applyAppearance(next)
+            }
         }
     }
 }

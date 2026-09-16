@@ -11,6 +11,17 @@ extension AppAppearance {
         }
     }
 
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .system:
+            nil
+        case .light:
+            NSAppearance(named: .aqua)
+        case .dark:
+            NSAppearance(named: .darkAqua)
+        }
+    }
+
     var displayName: String {
         switch self {
         case .system: "System"
@@ -21,17 +32,26 @@ extension AppAppearance {
 }
 
 enum JarvisTheme {
+    /// Single owner for the appearance decision. On macOS 27 MenuBarExtra
+    /// panels are WindowServer-composited and per-view SwiftUI state alone no
+    /// longer reliably repaints them, so the explicit choice is pushed to the
+    /// app, every window, and the SwiftUI environment together.
+    @MainActor
+    static func applyAppearance(_ appearance: AppAppearance) {
+        let appKitAppearance = appearance.nsAppearance
+        NSApp.appearance = appKitAppearance
+        for window in NSApp.windows {
+            window.appearance = appKitAppearance
+            propagateAppearance(in: window.contentView, appearance: appKitAppearance)
+        }
+    }
+
     @MainActor
     static func applyMenuBarPanelChrome(to window: NSWindow, appearance: AppAppearance) {
-        let appKitAppearance: NSAppearance?
-        switch appearance {
-        case .system:
-            appKitAppearance = nil
-        case .light:
-            appKitAppearance = NSAppearance(named: .aqua)
-        case .dark:
-            appKitAppearance = NSAppearance(named: .darkAqua)
-        }
+        let appKitAppearance = appearance.nsAppearance
+        // Keep the app-level override in sync so reopened or cached
+        // MenuBarExtra panels inherit the correct appearance on macOS 27.
+        NSApp.appearance = appKitAppearance
 
         window.appearance = appKitAppearance
         window.titlebarSeparatorStyle = .none
@@ -51,8 +71,14 @@ enum JarvisTheme {
         guard let view else { return }
         view.appearance = appearance
         if #available(macOS 26.0, *) {
-            if let glass = view as? NSGlassEffectView {
-                glass.appearance = appearance
+            // MenuBarExtra panels on macOS 26+ host Liquid Glass views. The
+            // container merges nearby glass shapes and samples behind-window
+            // content, so both it and the glass views must inherit the
+            // explicit appearance or the panel falls back to a light tint.
+            if view is NSGlassEffectView {
+                view.appearance = appearance
+            } else if view.className.contains("GlassEffectContainer") {
+                view.appearance = appearance
             }
         }
         for subview in view.subviews {

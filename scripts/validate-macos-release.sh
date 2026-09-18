@@ -15,7 +15,11 @@ INFO_PLIST="$APP_BUNDLE/Contents/Info.plist"
 EXECUTABLE="$APP_BUNDLE/Contents/MacOS/JarvisApp"
 GLASS_ORB_RESOURCES="$APP_BUNDLE/Contents/Resources/GlassVoiceOrbStudy"
 if [[ ! -d "$GLASS_ORB_RESOURCES" ]]; then
-  GLASS_ORB_RESOURCES="$APP_BUNDLE/Contents/Resources/JarvisMac_JarvisApp.bundle/GlassVoiceOrbStudy"
+  if [[ -d "$APP_BUNDLE/Contents/Resources/JarvisMac_JarvisApp.bundle/Contents/Resources/GlassVoiceOrbStudy" ]]; then
+    GLASS_ORB_RESOURCES="$APP_BUNDLE/Contents/Resources/JarvisMac_JarvisApp.bundle/Contents/Resources/GlassVoiceOrbStudy"
+  else
+    GLASS_ORB_RESOURCES="$APP_BUNDLE/Contents/Resources/JarvisMac_JarvisApp.bundle/GlassVoiceOrbStudy"
+  fi
 fi
 
 plutil -lint "$INFO_PLIST"

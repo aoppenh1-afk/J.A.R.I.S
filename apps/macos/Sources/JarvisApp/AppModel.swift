@@ -163,7 +163,7 @@ final class AppModel: ObservableObject {
                 runtimeHealth.hermes = .unavailable
             }
             snapshot.state = .error
-            snapshot.statusText = error.localizedDescription
+            snapshot.statusText = AppErrorFormatter.displayMessage(for: error)
         }
     }
 
@@ -231,7 +231,7 @@ final class AppModel: ObservableObject {
                 await candidate.hermesServer.shutdown()
             }
             snapshot.state = .error
-            snapshot.statusText = "Settings saved but could not be applied: \(error.localizedDescription)"
+            snapshot.statusText = "Settings saved but could not be applied: \(AppErrorFormatter.displayMessage(for: error))"
             throw error
         }
     }
@@ -590,7 +590,7 @@ final class AppModel: ObservableObject {
             runtimeHealth.audio = .degraded
             recordDiagnostic(.recoveryFailed, attempt: recoveryPolicy.maximumAttempts)
             snapshot.state = .error
-            snapshot.statusText = "Recovery failed: \(lastError?.localizedDescription ?? "Unknown error")"
+            snapshot.statusText = "Recovery failed: \(lastError.map { AppErrorFormatter.displayMessage(for: $0) } ?? "Unknown error")"
         }
     }
 
@@ -624,20 +624,20 @@ final class AppModel: ObservableObject {
         silenceSubmissionTask?.cancel()
         silenceSubmissionTask = nil
         let pipeline = pipeline
-        Task {
+        Task { [weak self] in
             await pipeline.beginListening()
-            guard hotkeyDown else { return }
+            guard let self, self.hotkeyDown else { return }
             do {
-                try capture.start(onAudioSignal: { [weak self] signal in
+                try self.capture.start(onAudioSignal: { [weak self] signal in
                     Task { @MainActor in
                         self?.receiveAudioSignal(signal)
                     }
                 })
             } catch {
-                runtimeHealth.audio = .unavailable
-                recordDiagnostic(.turnFailed)
-                snapshot.state = .error
-                snapshot.statusText = error.localizedDescription
+                self.runtimeHealth.audio = .unavailable
+                self.recordDiagnostic(.turnFailed)
+                self.snapshot.state = .error
+                self.snapshot.statusText = AppErrorFormatter.displayMessage(for: error)
             }
         }
     }

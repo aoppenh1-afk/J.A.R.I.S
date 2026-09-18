@@ -188,10 +188,19 @@ struct SettingsView: View {
             }
 
             Section("Hermes") {
-                TextField("Loopback endpoint", text: $preferences.hermesBaseURL)
+                HStack {
+                    TextField("Loopback endpoint", text: $preferences.hermesBaseURL)
+                    if preferences.hermesBaseURL != HermesRuntimeConfiguration.managedBaseURL.absoluteString {
+                        Button("Reset to Default") {
+                            preferences.hermesBaseURL = HermesRuntimeConfiguration.managedBaseURL.absoluteString
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                    }
+                }
                 Text(preferences.hermesBaseURL == HermesRuntimeConfiguration.managedBaseURL.absoluteString
-                     ? "Managed J.A.R.V.I.S. profile on the dedicated local endpoint."
-                     : "Custom endpoints are operator-managed and must serve the jarvis profile with a compatible authenticated API.")
+                     ? "Managed J.A.R.V.I.S. profile on the dedicated local endpoint (port 8643)."
+                     : "Custom endpoint configured. Managed auto-start requires http://127.0.0.1:8643. Use \"Reset to Default\" if you are experiencing connection issues on legacy ports (e.g. 8642).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -289,7 +298,7 @@ struct SettingsView: View {
             try LaunchAtLoginController.setEnabled(enabled)
             launchAtLoginStatus = ""
         } catch {
-            launchAtLoginStatus = error.localizedDescription
+            launchAtLoginStatus = AppErrorFormatter.displayMessage(for: error)
             launchAtLoginEnabled = LaunchAtLoginController.isEnabled
         }
     }
@@ -320,7 +329,7 @@ struct SettingsView: View {
             try await onApply(preferences)
             statusText = "Saved and applied."
         } catch {
-            statusText = "Saved, but not applied: \(error.localizedDescription)"
+            statusText = "Saved, but not applied: \(AppErrorFormatter.displayMessage(for: error))"
         }
     }
 }

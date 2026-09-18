@@ -12,15 +12,17 @@ public enum InstallationIdentity {
             return existing
         }
 
+        let defaultsKey = "jarvis.hermesSessionKey"
+        if let fallback = UserDefaults.standard.string(forKey: defaultsKey), !fallback.isEmpty {
+            _ = storeKeychainString(fallback, account: sessionAccount)
+            return fallback
+        }
+
         let generated = "jarvis:desktop:\(UUID().uuidString)"
         if storeKeychainString(generated, account: sessionAccount) {
             return generated
         }
 
-        let defaultsKey = "jarvis.hermesSessionKey"
-        if let fallback = UserDefaults.standard.string(forKey: defaultsKey) {
-            return fallback
-        }
         UserDefaults.standard.set(generated, forKey: defaultsKey)
         return generated
     }
@@ -30,9 +32,19 @@ public enum InstallationIdentity {
             return existing
         }
 
+        let defaultsKey = "jarvis.hermesAPIKey"
+        if let fallback = UserDefaults.standard.string(forKey: defaultsKey), !fallback.isEmpty {
+            _ = storeKeychainString(fallback, account: apiKeyAccount)
+            return fallback
+        }
+
         let generated = UUID().uuidString.replacingOccurrences(of: "-", with: "")
             + UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        _ = storeKeychainString(generated, account: apiKeyAccount)
+        if storeKeychainString(generated, account: apiKeyAccount) {
+            return generated
+        }
+
+        UserDefaults.standard.set(generated, forKey: defaultsKey)
         return generated
     }
 

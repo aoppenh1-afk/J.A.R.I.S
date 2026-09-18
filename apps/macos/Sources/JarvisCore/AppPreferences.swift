@@ -128,7 +128,9 @@ public struct AppPreferences: Codable, Sendable, Equatable {
         deepgramSTTModel = try container.decode(String.self, forKey: .deepgramSTTModel)
         deepgramTTSModel = try container.decode(String.self, forKey: .deepgramTTSModel)
         let decodedHermesBaseURL = try container.decode(String.self, forKey: .hermesBaseURL)
-        hermesBaseURL = decodedHermesBaseURL == HermesRuntimeConfiguration.legacyManagedBaseURL.absoluteString
+        let isLegacy = decodedHermesBaseURL == HermesRuntimeConfiguration.legacyManagedBaseURL.absoluteString
+            || URL(string: decodedHermesBaseURL).map(HermesRuntimeConfiguration.isLegacyManagedEndpoint) == true
+        hermesBaseURL = isLegacy
             ? HermesRuntimeConfiguration.managedBaseURL.absoluteString
             : decodedHermesBaseURL
         persistTranscriptHistory = try container.decodeIfPresent(Bool.self, forKey: .persistTranscriptHistory) ?? false
@@ -176,8 +178,12 @@ public enum AppPreferencesStore {
             return AppPreferences()
         }
         if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           object["hermesBaseURL"] as? String == HermesRuntimeConfiguration.legacyManagedBaseURL.absoluteString {
-            _ = save(preferences, defaults: defaults)
+           let rawURL = object["hermesBaseURL"] as? String {
+            let isLegacy = rawURL == HermesRuntimeConfiguration.legacyManagedBaseURL.absoluteString
+                || URL(string: rawURL).map(HermesRuntimeConfiguration.isLegacyManagedEndpoint) == true
+            if isLegacy {
+                _ = save(preferences, defaults: defaults)
+            }
         }
         return preferences
     }

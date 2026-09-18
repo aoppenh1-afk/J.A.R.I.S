@@ -7,9 +7,29 @@ public enum HermesRuntimeConfiguration {
 
     public static func isManagedEndpoint(_ url: URL) -> Bool {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        let isLoopback = components.host == "127.0.0.1"
+            || components.host == "localhost"
+            || components.host == "::1"
+            || components.host == "[::1]"
         return components.scheme == "http"
-            && components.host == "127.0.0.1"
+            && isLoopback
             && components.port == 8643
+            && (components.path.isEmpty || components.path == "/")
+            && components.user == nil
+            && components.password == nil
+            && components.query == nil
+            && components.fragment == nil
+    }
+
+    public static func isLegacyManagedEndpoint(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        let isLoopback = components.host == "127.0.0.1"
+            || components.host == "localhost"
+            || components.host == "::1"
+            || components.host == "[::1]"
+        return components.scheme == "http"
+            && isLoopback
+            && components.port == 8642
             && (components.path.isEmpty || components.path == "/")
             && components.user == nil
             && components.password == nil

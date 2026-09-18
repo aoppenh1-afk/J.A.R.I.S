@@ -516,7 +516,7 @@ public actor VoicePipeline {
     private func fail(_ error: Error) async {
         await publish {
             $0.state = .error
-            $0.statusText = String(describing: error)
+            $0.statusText = AppErrorFormatter.displayMessage(for: error)
             $0.activeRunID = nil
         }
     }

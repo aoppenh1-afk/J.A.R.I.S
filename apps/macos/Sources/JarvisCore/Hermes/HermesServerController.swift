@@ -1,6 +1,26 @@
 import Foundation
 
+private final class StderrCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        if buffer.count < 8192 {
+            buffer.append(chunk)
+        }
+    }
+
+    func string() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(data: buffer, encoding: .utf8) ?? ""
+    }
+}
+
 public actor HermesServerController {
+    private var currentStderrCollector: StderrCollector?
     public typealias ExitHandler = @Sendable (Int32) -> Void
 
     private let baseURL: URL
@@ -75,8 +95,16 @@ public actor HermesServerController {
             port: port,
             apiKey: apiKey
         )
+        let stderrPipe = Pipe()
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        process.standardError = stderrPipe
+        let collector = StderrCollector()
+        currentStderrCollector = collector
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            collector.append(chunk)
+        }
         process.terminationHandler = { [weak self] process in
             Task { await self?.processDidExit(process) }
         }
@@ -90,7 +118,7 @@ public actor HermesServerController {
         totalStartCount += 1
 
         do {
-            try await waitUntilReady()
+            try await waitUntilReady(collector: collector)
             restartLimiter.reset()
         } catch {
             stopOwnedProcess()
@@ -112,10 +140,14 @@ public actor HermesServerController {
     }
 
     private func processDidExit(_ exitedProcess: Process) {
+        if let pipe = exitedProcess.standardError as? Pipe {
+            pipe.fileHandleForReading.readabilityHandler = nil
+        }
         let identifier = ObjectIdentifier(exitedProcess)
         let wasIntentional = intentionalStops.remove(identifier) != nil
         if process === exitedProcess {
             process = nil
+            currentStderrCollector = nil
         }
         lastExitStatus = exitedProcess.terminationStatus
         guard !wasIntentional else { return }
@@ -123,14 +155,24 @@ public actor HermesServerController {
         onUnexpectedExit?(exitedProcess.terminationStatus)
     }
 
-    private func waitUntilReady() async throws {
+    private func waitUntilReady(collector: StderrCollector? = nil) async throws {
+        let activeCollector = collector ?? currentStderrCollector
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: readinessTimeout)
         while clock.now < deadline {
             if await isAuthenticatedReady() { return }
             if let process, !process.isRunning {
                 self.process = nil
-                throw HermesServerError.exitedBeforeReady(process.terminationStatus)
+                if let pipe = process.standardError as? Pipe {
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                }
+                let stderrString = activeCollector?.string() ?? ""
+                let trimmed = stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    throw HermesServerError.exitedBeforeReadyWithMessage(process.terminationStatus, message: trimmed)
+                } else {
+                    throw HermesServerError.exitedBeforeReady(process.terminationStatus)
+                }
             }
             try await Task.sleep(for: .milliseconds(200))
         }
@@ -230,6 +272,10 @@ public actor HermesServerController {
 
     private func stopOwnedProcess() {
         guard let process else { return }
+        if let pipe = process.standardError as? Pipe {
+            pipe.fileHandleForReading.readabilityHandler = nil
+        }
+        currentStderrCollector = nil
         if process.isRunning {
             intentionalStops.insert(ObjectIdentifier(process))
             process.terminate()
@@ -272,6 +318,7 @@ public enum HermesServerError: Error, Equatable, CustomStringConvertible, Locali
     case customEndpointUnavailable
     case executableNotFound
     case exitedBeforeReady(Int32)
+    case exitedBeforeReadyWithMessage(Int32, message: String)
     case launchFailed(String)
     case managedEndpointOccupied
     case missingPort
@@ -290,6 +337,12 @@ public enum HermesServerError: Error, Equatable, CustomStringConvertible, Locali
             return "Hermes is not installed in a supported location."
         case .exitedBeforeReady(let status):
             return "Hermes exited before its API became ready (status \(status))."
+        case .exitedBeforeReadyWithMessage(let status, let message):
+            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                return "Hermes exited before its API became ready (status \(status))."
+            }
+            return "Hermes exited before its API became ready (status \(status)): \(trimmed)"
         case .launchFailed(let message):
             return "Unable to launch Hermes: \(message)"
         case .managedEndpointOccupied:

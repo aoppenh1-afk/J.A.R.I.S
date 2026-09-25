@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 private final class StderrCollector: @unchecked Sendable {
     private let lock = NSLock()
@@ -56,9 +57,9 @@ public actor HermesServerController {
         if let process, !process.isRunning {
             self.process = nil
         }
-        if process != nil {
+        if let process {
             if await isAuthenticatedReady() { return }
-            try await waitUntilReady()
+            try await waitUntilReady(for: process)
             return
         }
 
@@ -95,12 +96,12 @@ public actor HermesServerController {
             port: port,
             apiKey: apiKey
         )
-        let stderrPipe = Pipe()
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = stderrPipe
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
         let collector = StderrCollector()
         currentStderrCollector = collector
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+        outputPipe.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
             collector.append(chunk)
@@ -118,7 +119,7 @@ public actor HermesServerController {
         totalStartCount += 1
 
         do {
-            try await waitUntilReady(collector: collector)
+            try await waitUntilReady(for: process, collector: collector)
             restartLimiter.reset()
         } catch {
             stopOwnedProcess()
@@ -140,7 +141,7 @@ public actor HermesServerController {
     }
 
     private func processDidExit(_ exitedProcess: Process) {
-        if let pipe = exitedProcess.standardError as? Pipe {
+        if let pipe = exitedProcess.standardOutput as? Pipe {
             pipe.fileHandleForReading.readabilityHandler = nil
         }
         let identifier = ObjectIdentifier(exitedProcess)
@@ -155,23 +156,38 @@ public actor HermesServerController {
         onUnexpectedExit?(exitedProcess.terminationStatus)
     }
 
-    private func waitUntilReady(collector: StderrCollector? = nil) async throws {
+    private func waitUntilReady(for launchedProcess: Process, collector: StderrCollector? = nil) async throws {
         let activeCollector = collector ?? currentStderrCollector
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: readinessTimeout)
         while clock.now < deadline {
             if await isAuthenticatedReady() { return }
-            if let process, !process.isRunning {
-                self.process = nil
-                if let pipe = process.standardError as? Pipe {
-                    pipe.fileHandleForReading.readabilityHandler = nil
+            if !launchedProcess.isRunning {
+                if self.process === launchedProcess { self.process = nil }
+                if let pipe = launchedProcess.standardOutput as? Pipe {
+                    let handle = pipe.fileHandleForReading
+                    handle.readabilityHandler = nil
+                    let descriptor = handle.fileDescriptor
+                    let flags = fcntl(descriptor, F_GETFL)
+                    if flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 {
+                        var bytes = [UInt8](repeating: 0, count: 1024)
+                        while true {
+                            let count = Darwin.read(descriptor, &bytes, bytes.count)
+                            guard count > 0 else { break }
+                            activeCollector?.append(Data(bytes.prefix(count)))
+                        }
+                        _ = fcntl(descriptor, F_SETFL, flags)
+                    }
                 }
                 let stderrString = activeCollector?.string() ?? ""
                 let trimmed = stderrString.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    throw HermesServerError.exitedBeforeReadyWithMessage(process.terminationStatus, message: trimmed)
+                let safeMessage = apiKey.isEmpty
+                    ? trimmed
+                    : trimmed.replacingOccurrences(of: apiKey, with: "<REDACTED>")
+                if !safeMessage.isEmpty {
+                    throw HermesServerError.exitedBeforeReadyWithMessage(launchedProcess.terminationStatus, message: safeMessage)
                 } else {
-                    throw HermesServerError.exitedBeforeReady(process.terminationStatus)
+                    throw HermesServerError.exitedBeforeReady(launchedProcess.terminationStatus)
                 }
             }
             try await Task.sleep(for: .milliseconds(200))
@@ -216,7 +232,7 @@ public actor HermesServerController {
     }
 
     static func launchArguments() -> [String] {
-        ["-p", HermesRuntimeConfiguration.profileName, "gateway", "run"]
+        ["-p", HermesRuntimeConfiguration.profileName, "gateway", "run", "--force", "--external-supervisor"]
     }
 
     static func managedLaunchEnvironment(
@@ -272,7 +288,7 @@ public actor HermesServerController {
 
     private func stopOwnedProcess() {
         guard let process else { return }
-        if let pipe = process.standardError as? Pipe {
+        if let pipe = process.standardOutput as? Pipe {
             pipe.fileHandleForReading.readabilityHandler = nil
         }
         currentStderrCollector = nil

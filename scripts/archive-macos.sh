@@ -18,11 +18,13 @@ ENTITLEMENTS="$MACOS_ROOT/Packaging/Jarvis.entitlements"
 
 "$PROJECT_ROOT/scripts/validate-prerequisites.sh" --build
 
-if command -v xcodegen >/dev/null 2>&1; then
-  "$PROJECT_ROOT/scripts/generate-xcode-project.sh"
-elif [[ ! -d "$PROJECT_PATH" ]]; then
-  printf 'The generated Xcode project is missing and XcodeGen is unavailable.\n' >&2
-  exit 1
+if [[ ! -d "$PROJECT_PATH" ]]; then
+  if command -v xcodegen >/dev/null 2>&1; then
+    "$PROJECT_ROOT/scripts/generate-xcode-project.sh"
+  else
+    printf 'The generated Xcode project is missing and XcodeGen is unavailable.\n' >&2
+    exit 1
+  fi
 fi
 
 rm -rf "$ARCHIVE_PATH" "$EXPORT_PATH" "$EXPORTED_APP"
@@ -41,7 +43,7 @@ if [[ -z "$SIGNING_IDENTITY" ]]; then
     -configuration Release \
     -destination 'generic/platform=macOS' \
     -archivePath "$ARCHIVE_PATH" \
-    CODE_SIGN_STYLE=Automatic \
+    CODE_SIGN_STYLE=Manual \
     "CODE_SIGN_IDENTITY=$DEVELOPMENT_SIGNING_IDENTITY" \
     "DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM" \
     "${COMMON_BUILD_SETTINGS[@]}" \

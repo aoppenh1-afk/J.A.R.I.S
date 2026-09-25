@@ -34,8 +34,39 @@ final class HermesServerControllerTests: XCTestCase {
     func testLaunchArgumentsSelectJarvisProfile() {
         XCTAssertEqual(
             HermesServerController.launchArguments(),
-            ["-p", "jarvis", "gateway", "run"]
+            ["-p", "jarvis", "gateway", "run", "--force", "--external-supervisor"]
         )
+    }
+
+    func testFastLauncherExitReportsItsOutputWithoutWaitingForDeadline() async throws {
+        HermesServerURLProtocol.handler = { _ in throw URLError(.cannotConnectToHost) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("hermes")
+        try "#!/bin/sh\necho \"Profile 'jarvis' does not get a gateway of its own.\"\nexit 78\n"
+            .write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL,
+            apiKey: "test-key",
+            executableOverride: executable.path,
+            session: makeSession(),
+            readinessTimeout: .seconds(3)
+        )
+        let start = ContinuousClock.now
+        do {
+            try await controller.ensureAvailable()
+            XCTFail("Expected the launcher to exit")
+        } catch let error as HermesServerError {
+            guard case .exitedBeforeReadyWithMessage(let status, let message) = error else {
+                return XCTFail("Expected Hermes output, got \(error)")
+            }
+            XCTAssertEqual(status, 78)
+            XCTAssertTrue(message.contains("does not get a gateway of its own"))
+        }
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(2))
     }
 
     func testManagedLaunchEnvironmentOverridesProfileListenerValues() {

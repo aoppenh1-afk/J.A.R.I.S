@@ -1,21 +1,21 @@
 # Dedicated Hermes profile
 
-J.A.R.V.I.S. uses the named Hermes profile `jarvis` at `~/.hermes/profiles/jarvis` with Hermes 0.20.0.
+J.A.R.V.I.S. uses the named Hermes profile `jarvis` at `~/.hermes/profiles/jarvis`.
 
 ## Runtime contract
 
 - Managed profile: `jarvis`
 - Managed endpoint: `http://127.0.0.1:8643`
-- Managed launch: `hermes -p jarvis gateway run`
+- Managed launch: `hermes -p jarvis gateway run --force --external-supervisor`
 - Profile multiplexing: disabled
 - Listener enabled/host/port/key source: app child-process environment
 - Bearer key source: macOS Keychain through `InstallationIdentity`
 
-The app never runs `hermes profile use jarvis`. Port 8642 remains available to the general/default Hermes gateway.
+The app never runs `hermes profile use jarvis`. Port 8642 remains available to the general/default Hermes gateway. Hermes 0.21.5 refuses a separate named-profile gateway without `--force`; this flag explicitly keeps the app-owned API listener separate. `--external-supervisor` returns restarts to the app instead of leaving a detached gateway process behind.
 
 A listener already present on port 8643 is not accepted as proof of profile identity. The app reports it as occupied and unverified unless the current app instance owns the process. Readiness uses authenticated `/v1/capabilities` and verifies the run, SSE, status, stop, and approval API contract.
 
-A non-default loopback endpoint is operator-managed. J.A.R.V.I.S. does not auto-launch Hermes there. The endpoint must accept the configured bearer key and expose the compatible API, while the operator remains responsible for ensuring it serves the `jarvis` profile because Hermes 0.20.0 does not attest named-profile identity in its health or capability payloads.
+A non-default loopback endpoint is operator-managed. J.A.R.V.I.S. does not auto-launch Hermes there. The endpoint must accept the configured bearer key and expose the compatible API, while the operator remains responsible for ensuring it serves the `jarvis` profile because Hermes's capability payload does not attest named-profile identity.
 
 ## Profile contents
 

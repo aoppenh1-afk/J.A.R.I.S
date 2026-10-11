@@ -12,6 +12,8 @@ The release workflow defaults to `personal` mode. It builds and packages Jarvis 
 
 Personal builds are not Apple notarized. After downloading the first release, copy Jarvis to `/Applications` before opening it. If macOS blocks the app, try opening it, then use **System Settings → Privacy & Security → Open Anyway**. Follow [Apple's instructions](https://support.apple.com/en-us/102445) for this app-specific approval.
 
+The first updater-enabled release, [version 0.2.0](https://github.com/aoppenh1-afk/J.A.R.I.S/releases/tag/v0.2.0), is published. Download its DMG or ZIP, then install it once to replace the older app. The release workflow passed, and both the public feed and archive were downloaded without authentication and verified against Jarvis's public update key.
+
 Ad hoc signatures do not provide a stable Apple developer identity across builds. macOS may ask for microphone, Keychain, or other permissions again after an update. Credential and permission persistence across personal builds still needs physical testing. Sparkle continues to verify the update archive and feed against Jarvis's public key. [Sparkle's setup guide](https://sparkle-project.org/documentation/) treats Developer ID signing and notarization as recommended when available.
 
 The personal app's entitlements allow its embedded Sparkle framework to load without an Apple Team ID. Developer ID builds use the stricter original entitlements. No release or installation script changes the Mac's Gatekeeper settings.

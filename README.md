@@ -91,3 +91,5 @@ Settings save and apply automatically after a short pause in editing. Changes ar
 The **Models** pane loads Hermes's configured provider catalog and lets you choose a provider and model, or enter custom IDs. Empty fields follow Hermes's defaults. Choices apply to the next Jarvis request without changing Hermes CLI or desktop settings or reloading speech models.
 
 Jarvis includes Sparkle updates and a GitHub Actions release pipeline. Personal releases work without a paid Apple developer account and use the configured Ed25519 update key. Apple Developer ID signing and notarization are optional. The repository is public after a [secret audit](docs/repository-secret-audit.md). See [update setup and release instructions](docs/updates.md) for the one-time installation of the first build containing the updater and macOS approval for personal builds.
+
+Download the updater-enabled app from [GitHub Releases](https://github.com/aoppenh1-afk/J.A.R.I.S/releases/latest). Install it once; subsequent tagged versions are built on GitHub and offered through Jarvis's update controls.

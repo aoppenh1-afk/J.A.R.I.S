@@ -10,8 +10,20 @@ DMG_PATH="$OUTPUT_ROOT/$APP_NAME-macos-arm64.dmg"
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/jarvis-dmg.XXXXXX")"
 trap 'rm -rf "$STAGING_DIR"' EXIT
 
-JARVIS_REQUIRE_DISTRIBUTION_SIGNATURE=1 \
-  "$PROJECT_ROOT/scripts/validate-macos-release.sh" "$APP_BUNDLE"
+case "${JARVIS_RELEASE_MODE:-developer-id}" in
+  personal)
+    JARVIS_REQUIRE_DISTRIBUTION_SIGNATURE=0 JARVIS_REQUIRE_PERSONAL_SIGNATURE=1 \
+      "$PROJECT_ROOT/scripts/validate-macos-release.sh" "$APP_BUNDLE"
+    ;;
+  developer-id)
+    JARVIS_REQUIRE_DISTRIBUTION_SIGNATURE=1 \
+      "$PROJECT_ROOT/scripts/validate-macos-release.sh" "$APP_BUNDLE"
+    ;;
+  *)
+    printf 'JARVIS_RELEASE_MODE must be personal or developer-id.\n' >&2
+    exit 1
+    ;;
+esac
 
 rm -f "$ZIP_PATH" "$DMG_PATH"
 ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$ZIP_PATH"

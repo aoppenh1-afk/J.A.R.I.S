@@ -20,6 +20,7 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       GH_TOKEN: ${{ github.token }}
+      JARVIS_RELEASE_MODE: ${{ vars.JARVIS_RELEASE_MODE || 'personal' }}
       JARVIS_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
       APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
       APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
@@ -32,10 +33,22 @@ jobs:
         shell: bash
         run: |
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Use a stable vMAJOR.MINOR.PATCH tag'; exit 1; }
-          for name in JARVIS_SIGNING_IDENTITY APPLE_TEAM_ID APPLE_SIGNING_CERTIFICATE APPLE_SIGNING_PASSWORD APPLE_ID APPLE_APP_PASSWORD SPARKLE_PRIVATE_KEY; do
-            [[ -n "${!name}" ]] || { echo "Missing release setting: $name"; exit 1; }
-          done
-          [[ "$JARVIS_SIGNING_IDENTITY" == 'Developer ID Application:'* ]] || { echo 'A Developer ID Application identity is required'; exit 1; }
+          [[ -n "$SPARKLE_PRIVATE_KEY" ]] || { echo 'Missing SPARKLE_PRIVATE_KEY'; exit 1; }
+          case "$JARVIS_RELEASE_MODE" in
+            personal)
+              echo 'JARVIS_SIGNING_IDENTITY=-' >> "$GITHUB_ENV"
+              ;;
+            developer-id)
+              for name in JARVIS_SIGNING_IDENTITY APPLE_TEAM_ID APPLE_SIGNING_CERTIFICATE APPLE_SIGNING_PASSWORD APPLE_ID APPLE_APP_PASSWORD; do
+                [[ -n "${!name}" ]] || { echo "Missing release setting: $name"; exit 1; }
+              done
+              [[ "$JARVIS_SIGNING_IDENTITY" == 'Developer ID Application:'* ]] || { echo 'A Developer ID Application identity is required'; exit 1; }
+              ;;
+            *)
+              echo 'JARVIS_RELEASE_MODE must be personal or developer-id'
+              exit 1
+              ;;
+          esac
           echo "JARVIS_MARKETING_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
           echo "JARVIS_BUILD_NUMBER=$((1000 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
@@ -43,6 +56,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
       - name: Import signing certificate
+        if: env.JARVIS_RELEASE_MODE == 'developer-id'
         shell: bash
         run: |
           umask 077
@@ -60,11 +74,19 @@ jobs:
           rm "$certificate"
       - name: Test
         run: ./scripts/check.sh
-      - name: Package and validate signed app
+      - name: Package and validate app
         run: |
           ./scripts/package-macos.sh
-          JARVIS_REQUIRE_DISTRIBUTION_SIGNATURE=1 JARVIS_REQUIRE_UPDATER_CONFIGURATION=1 ./scripts/validate-installed-app.sh
+          if [[ "$JARVIS_RELEASE_MODE" == personal ]]; then
+            JARVIS_REQUIRE_PERSONAL_SIGNATURE=1 JARVIS_REQUIRE_UPDATER_CONFIGURATION=1 ./scripts/validate-installed-app.sh
+          else
+            JARVIS_REQUIRE_DISTRIBUTION_SIGNATURE=1 JARVIS_REQUIRE_UPDATER_CONFIGURATION=1 ./scripts/validate-installed-app.sh
+          fi
+      - name: Create personal release archives
+        if: env.JARVIS_RELEASE_MODE == 'personal'
+        run: ./scripts/make-release-artifacts.sh
       - name: Notarize and staple
+        if: env.JARVIS_RELEASE_MODE == 'developer-id'
         shell: bash
         run: |
           xcrun notarytool store-credentials JARVIS_RELEASE --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
@@ -82,10 +104,20 @@ jobs:
       - name: Publish release
         shell: bash
         run: |
+          notes="$RUNNER_TEMP/release-signing-notes.md"
+          if [[ "$JARVIS_RELEASE_MODE" == personal ]]; then
+            cat > "$notes" <<'NOTES'
+          This is a personal build with an ad hoc code signature. It is not Apple notarized. Sparkle verifies update archives and the feed using Jarvis's Ed25519 update key.
+
+          Install the first updater-enabled build in Applications. If macOS blocks it, try opening it, then use System Settings → Privacy & Security → Open Anyway. See [Apple's instructions](https://support.apple.com/en-us/102445) and [Jarvis's update guide](https://github.com/aoppenh1-afk/J.A.R.I.S/blob/main/docs/updates.md). macOS may request microphone or Keychain access again after updates.
+          NOTES
+          else
+            printf 'This build is Developer ID signed and Apple notarized.\n' > "$notes"
+          fi
           if gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' > "$RUNNER_TEMP/release-state" 2>/dev/null; then
             [[ "$(cat "$RUNNER_TEMP/release-state")" == true ]] || { echo 'A published release already exists; create a new version'; exit 1; }
           else
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "J.A.R.V.I.S. ${RELEASE_TAG#v}" --generate-notes
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "J.A.R.V.I.S. ${RELEASE_TAG#v}" --generate-notes --notes-file "$notes"
           fi
           gh release upload "$RELEASE_TAG" dist/J.A.R.V.I.S-macos-arm64.zip dist/J.A.R.V.I.S-macos-arm64.dmg dist/appcast.xml --clobber
           gh release edit "$RELEASE_TAG" --draft=false --latest
@@ -94,7 +126,7 @@ jobs:
           name: jarvis-${{ env.RELEASE_TAG }}
           path: dist/
       - name: Remove signing keychain
-        if: always()
+        if: always() && env.JARVIS_RELEASE_MODE == 'developer-id'
         run: |
           security delete-keychain "$RUNNER_TEMP/jarvis-release.keychain-db" || true
           rm -f "$RUNNER_TEMP/jarvis-signing.p12"

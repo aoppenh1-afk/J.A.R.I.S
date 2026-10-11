@@ -5,6 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_BUNDLE="${1:-$PROJECT_ROOT/dist/J.A.R.V.I.S.app}"
 REQUIRE_DISTRIBUTION="${JARVIS_REQUIRE_DISTRIBUTION_SIGNATURE:-0}"
 REQUIRE_NOTARIZATION="${JARVIS_REQUIRE_NOTARIZATION:-0}"
+REQUIRE_PERSONAL="${JARVIS_REQUIRE_PERSONAL_SIGNATURE:-0}"
 
 if [[ ! -d "$APP_BUNDLE" ]]; then
   printf 'Application bundle not found: %s\n' "$APP_BUNDLE" >&2
@@ -88,8 +89,16 @@ if grep -q '^Signature=adhoc$' <<<"$SIGNING_SUMMARY"; then
     printf 'A Developer ID Application signature is required for distribution.\n' >&2
     exit 1
   fi
-  printf '✓ valid ad hoc signature with hardened runtime (local validation only)\n'
+  if [[ "$(plutil -extract 'com\.apple\.security\.cs\.disable-library-validation' raw - <<<"$ENTITLEMENTS_XML" 2>/dev/null || true)" != "true" ]]; then
+    printf 'Ad hoc builds must allow the embedded Sparkle framework to load.\n' >&2
+    exit 1
+  fi
+  printf '✓ valid ad hoc signature with hardened runtime (personal build, not Apple notarized)\n'
 else
+  if [[ "$REQUIRE_PERSONAL" == "1" ]]; then
+    printf 'Personal release validation requires an ad hoc signature.\n' >&2
+    exit 1
+  fi
   if [[ "$REQUIRE_DISTRIBUTION" == "1" ]] && ! grep -q '^Authority=Developer ID Application:' <<<"$SIGNING_SUMMARY"; then
     printf 'A Developer ID Application signature is required for distribution.\n' >&2
     exit 1

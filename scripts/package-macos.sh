@@ -10,9 +10,14 @@ APP_BUNDLE="$OUTPUT_ROOT/$APP_NAME.app"
 BUNDLE_IDENTIFIER="${JARVIS_BUNDLE_IDENTIFIER:-com.jarvis.voice-assistant}"
 MARKETING_VERSION="${JARVIS_MARKETING_VERSION:-0.1.0}"
 BUILD_NUMBER="${JARVIS_BUILD_NUMBER:-1}"
-SIGNING_IDENTITY="${JARVIS_SIGNING_IDENTITY:-Apple Development: senderopp@icloud.com (Y3GCC2VAB2)}"
+SIGNING_IDENTITY="${JARVIS_SIGNING_IDENTITY:--}"
 ENTITLEMENTS="$PACKAGING_ROOT/Jarvis.entitlements"
 INFO_PLIST="$PACKAGING_ROOT/Info.plist"
+if [[ "$SIGNING_IDENTITY" == "-" ]]; then
+  # Ad hoc signatures have no Team ID for hardened-runtime library validation.
+  # Allow the embedded Sparkle framework to load in personal builds.
+  ENTITLEMENTS="$PACKAGING_ROOT/JarvisPersonal.entitlements"
+fi
 
 "$PROJECT_ROOT/scripts/validate-prerequisites.sh" --build
 
@@ -102,7 +107,7 @@ printf '\nPackaged %s\n' "$APP_BUNDLE"
 printf 'Bundle identifier: %s\n' "$BUNDLE_IDENTIFIER"
 printf 'Version: %s (%s)\n' "$MARKETING_VERSION" "$BUILD_NUMBER"
 if [[ "$SIGNING_IDENTITY" == "-" ]]; then
-  printf 'Signature: ad hoc (local validation only)\n'
+  printf 'Signature: ad hoc (personal build, not Apple notarized)\n'
 else
   printf 'Signature: %s\n' "$SIGNING_IDENTITY"
 fi

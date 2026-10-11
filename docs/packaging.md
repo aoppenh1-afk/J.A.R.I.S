@@ -4,8 +4,8 @@
 
 J.A.R.V.I.S. has two real native packaging paths:
 
-- `archive-macos.sh` is the canonical release path. It builds the `JarvisNativeApp` Xcode application target, creates an `.xcarchive`, and exports `J.A.R.V.I.S.app`.
-- `package-macos.sh` is a faster local path that assembles the tested SwiftPM `JarvisApp` executable into the same application-bundle layout.
+- `archive-macos.sh` builds the `JarvisNativeApp` Xcode application target, creates an `.xcarchive`, and exports `J.A.R.V.I.S.app` for Xcode development or Developer ID distribution.
+- `package-macos.sh` assembles the tested SwiftPM `JarvisApp` executable into the same application-bundle layout. GitHub releases use this path. It defaults to ad hoc signing for personal builds without an Apple developer membership; set `JARVIS_SIGNING_IDENTITY` to use a certificate.
 
 `JarvisCore` and the vendored `ParakeetTDT` target remain Swift package products, so the Xcode application target and XCTest suite use the same implementation.
 
@@ -48,6 +48,8 @@ Packaging and archive validation do not launch the app, request microphone acces
 - Build-setting-driven version, build, and bundle identifier values.
 
 `apps/macos/Packaging/Jarvis.entitlements` contains only audio-input and outbound-network capabilities. Hardened runtime is enabled in the Xcode target and every signing command. Release validation extracts the signed entitlements and verifies both required values.
+
+Ad hoc packaging uses `JarvisPersonal.entitlements`, which also disables hardened-runtime library validation so the embedded Sparkle framework can load without an Apple Team ID. Certificate-signed builds keep the original entitlements. See [updates.md](updates.md) for personal releases and initial macOS approval.
 
 ## Pinned Parakeet source and external model
 
@@ -103,7 +105,13 @@ dist/J.A.R.V.I.S-macos-arm64.zip
 dist/J.A.R.V.I.S-macos-arm64.dmg
 ```
 
-The script rejects ad hoc signatures and never uploads anything.
+The script requires Developer ID signatures by default and never uploads anything. For a personal build, opt into ad hoc validation explicitly:
+
+```bash
+JARVIS_RELEASE_MODE=personal ./scripts/make-release-artifacts.sh dist/J.A.R.V.I.S.app
+```
+
+The personal mode requires an ad hoc signature and the entitlement needed to load Sparkle. These builds are not Apple notarized.
 
 ## Explicit notarization and stapling
 

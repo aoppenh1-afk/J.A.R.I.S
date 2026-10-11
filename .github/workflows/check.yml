@@ -17,7 +17,8 @@ jobs:
           JARVIS_SIGNING_IDENTITY: '-'
         run: |
           ./scripts/package-macos.sh
-          ./scripts/validate-installed-app.sh
+          JARVIS_REQUIRE_PERSONAL_SIGNATURE=1 JARVIS_REQUIRE_UPDATER_CONFIGURATION=1 ./scripts/validate-installed-app.sh
+          JARVIS_RELEASE_MODE=personal ./scripts/make-release-artifacts.sh
   secrets:
     runs-on: ubuntu-latest
     steps:

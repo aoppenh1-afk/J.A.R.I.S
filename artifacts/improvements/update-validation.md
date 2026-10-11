@@ -33,3 +33,12 @@ This build has not replaced the installed app. Initial downloaded-app approval a
 - [Checks](https://github.com/aoppenh1-afk/Siri-2.0/actions/runs/38100702620) passed for the implementation, including tests, personal packaging, ZIP/DMG generation, and the Git history secret scan.
 - The configured `releases/latest/download/appcast.xml` feed and its ZIP downloaded without a GitHub token. The downloaded app's public key matches the trusted source. The archive and feed signatures both verify.
 - The release includes a ZIP, DMG, and signed appcast. The existing installed app still needs to be replaced once with the updater-enabled build.
+
+## Downloaded application startup
+
+The first installation of version 0.2.1, build 1002, exposed a SwiftPM resource lookup failure. The downloaded app exited at launch in `Bundle.module`; the GitHub toolchain's generated accessor searched the app root and an absolute runner build path, while the resource bundle was packaged in `Contents/Resources`. The local Xcode-backed SwiftPM accessor already searched `Contents/Resources`, so local packaging checks had missed the failure.
+
+- Launching the installed download through cua-driver and checking the returned process reproduced the startup failure twice. The crash report identified the resource accessor during menu icon initialization.
+- Menu icons and the Liquid Glass renderer now share a resource resolver. Packaged SwiftPM apps explicitly resolve their embedded resource bundle; development executables retain SwiftPM's normal lookup.
+- `JarvisApp --validate-resources` checks the actual resolver, decodes the menu icons, reads the renderer assets, and rejects resources outside the app. It exits before loading user preferences, credentials, models, or the updater. Release validation runs this check after signature validation, with a timeout, so CI exercises resource lookup before publication.
+- All 121 tests, local personal packaging, the resource probe, signed bundle validation, ShellCheck, actionlint, diff checks, and a redacted secret scan pass for the fix.

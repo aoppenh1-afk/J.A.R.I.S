@@ -112,4 +112,11 @@ if [[ "$REQUIRE_NOTARIZATION" == "1" ]]; then
   printf '✓ Gatekeeper assessment and stapled notarization ticket validated\n'
 fi
 
+# Exercise the same bundle lookup used at launch, including the menu icon.
+# Resource files being present is insufficient if SwiftPM resolves a build path.
+python3 - "$EXECUTABLE" <<'PY'
+import subprocess, sys
+subprocess.run([sys.argv[1], '--validate-resources'], check=True, timeout=15)
+PY
+
 printf '✓ Info.plist, arm64 executable, entitlements, and signature validated\n'

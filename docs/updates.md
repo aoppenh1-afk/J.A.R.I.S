@@ -43,14 +43,14 @@ Use GitHub's secret input or `gh secret set NAME` with standard input. Do not pa
 Push a stable version tag such as `v0.2.0`, or run **Release macOS app** manually using an existing tag. GitHub builds the app, so you do not need to rebuild it locally for each release. The workflow:
 
 1. Checks the release mode and required credentials, then checks out the requested tag.
-2. Runs tests and packages the Apple Silicon app, signing Sparkle's helpers with the same identity as Jarvis. Personal builds use ad hoc signatures.
+2. Runs tests and packages the Apple Silicon app, signing Sparkle's helpers with the same identity as Jarvis. Personal builds use ad hoc signatures. Validation runs the packaged executable's resource lookup and verifies that its images and Liquid Glass renderer load from inside the app.
 3. Creates a ZIP and DMG. Developer ID mode also notarizes the app and DMG, staples the tickets, and validates the result.
 4. Generates a signed appcast and checks its download URL, archive length, and version, then verifies both Ed25519 signatures against the public key in the packaged app.
 5. Uploads the ZIP, DMG, and appcast to a draft release, then publishes it as the latest release. Release notes identify the signing mode and explain initial installation.
 
 The marketing version comes from the tag. The build number is `1000 + GITHUB_RUN_NUMBER`, so published builds increase beyond the existing development build number. Published releases cannot be overwritten by the workflow; use a new tag for a new update. Failed draft releases can be retried.
 
-Install the first build containing Sparkle once. Later releases can be installed from inside Jarvis. The old installed app does not contain an updater and cannot discover its own replacement. Until the first release is published, the feed URL has no release asset to download.
+Install the first build containing Sparkle once. Later releases can be installed from inside Jarvis. The old installed app does not contain an updater and cannot discover its own replacement.
 
 `Checks` uses an Apple Silicon macOS 26 runner with the SDK needed to compile the app's Liquid Glass window chrome. It runs tests, validates personal app packaging and ZIP/DMG generation, and scans all fetched Git history for secrets on pushes and pull requests. Release jobs run only for tags or manual dispatch, never for pull requests.
 

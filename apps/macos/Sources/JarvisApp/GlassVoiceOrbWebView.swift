@@ -367,11 +367,7 @@ private final class GlassVoiceOrbSchemeHandler: NSObject, WKURLSchemeHandler {
 
 private enum GlassVoiceOrbResources {
     static var rootURL: URL? {
-#if SWIFT_PACKAGE
-        locate(in: .module)
-#else
-        locate(in: .main)
-#endif
+        locate(in: JarvisResources.bundle)
     }
 
     private static func locate(in bundle: Bundle) -> URL? {

@@ -109,7 +109,7 @@ jobs:
             cat > "$notes" <<'NOTES'
           This is a personal build with an ad hoc code signature. It is not Apple notarized. Sparkle verifies update archives and the feed using Jarvis's Ed25519 update key.
 
-          Install the first updater-enabled build in Applications. If macOS blocks it, try opening it, then use System Settings → Privacy & Security → Open Anyway. See [Apple's instructions](https://support.apple.com/en-us/102445) and [Jarvis's update guide](https://github.com/aoppenh1-afk/J.A.R.I.S/blob/main/docs/updates.md). macOS may request microphone or Keychain access again after updates.
+          Install the first updater-enabled build in Applications. If macOS blocks it, try opening it, then use System Settings → Privacy & Security → Open Anyway. See [Apple's instructions](https://support.apple.com/en-us/102445) and [Jarvis's update guide](https://github.com/aoppenh1-afk/Siri-2.0/blob/main/docs/updates.md). macOS may request microphone or Keychain access again after updates.
           NOTES
           else
             printf 'This build is Developer ID signed and Apple notarized.\n' > "$notes"

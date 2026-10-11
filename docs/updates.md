@@ -1,6 +1,6 @@
 # App updates
 
-Jarvis uses Sparkle 2.10.0 for signed updates and GitHub Releases for distribution. The update feed is `https://github.com/aoppenh1-afk/J.A.R.I.S/releases/latest/download/appcast.xml`. No GitHub token is stored in the app.
+Jarvis uses Sparkle 2.10.0 for signed updates and GitHub Releases for distribution. The update feed is `https://github.com/aoppenh1-afk/Siri-2.0/releases/latest/download/appcast.xml`. No GitHub token is stored in the app.
 
 General settings include automatic checking, automatic downloading, and Check for Updates. Checking is enabled by default; downloading is opt-in. The popover menu also includes Check for Updates. Sparkle owns these preferences and applies them immediately.
 
@@ -12,7 +12,7 @@ The release workflow defaults to `personal` mode. It builds and packages Jarvis 
 
 Personal builds are not Apple notarized. After downloading the first release, copy Jarvis to `/Applications` before opening it. If macOS blocks the app, try opening it, then use **System Settings → Privacy & Security → Open Anyway**. Follow [Apple's instructions](https://support.apple.com/en-us/102445) for this app-specific approval.
 
-The first updater-enabled release, [version 0.2.0](https://github.com/aoppenh1-afk/J.A.R.I.S/releases/tag/v0.2.0), is published. Download its DMG or ZIP, then install it once to replace the older app. The release workflow passed, and both the public feed and archive were downloaded without authentication and verified against Jarvis's public update key.
+The first updater-enabled release, [version 0.2.0](https://github.com/aoppenh1-afk/Siri-2.0/releases/tag/v0.2.0), is published. Download the [latest release](https://github.com/aoppenh1-afk/Siri-2.0/releases/latest), then install it once to replace the older app. The release workflow passed, and both the public feed and archive were downloaded without authentication and verified against Jarvis's public update key.
 
 Ad hoc signatures do not provide a stable Apple developer identity across builds. macOS may ask for microphone, Keychain, or other permissions again after an update. Credential and permission persistence across personal builds still needs physical testing. Sparkle continues to verify the update archive and feed against Jarvis's public key. [Sparkle's setup guide](https://sparkle-project.org/documentation/) treats Developer ID signing and notarization as recommended when available.
 

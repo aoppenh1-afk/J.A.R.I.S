@@ -33,7 +33,7 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>SUFeedURL</key>
-	<string>https://github.com/aoppenh1-afk/J.A.R.I.S/releases/latest/download/appcast.xml</string>
+	<string>https://github.com/aoppenh1-afk/Siri-2.0/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>TnQdoGJX2WMte6kYceh1Yj8HDKwpWBlm6T55FvEmaFw=</string>
 	<key>SUEnableAutomaticChecks</key>

@@ -29,7 +29,7 @@ This build has not replaced the installed app. Initial downloaded-app approval a
 
 ## Published personal release
 
-- [Version 0.2.0, build 1001](https://github.com/aoppenh1-afk/J.A.R.I.S/releases/tag/v0.2.0) was built and published by [GitHub Actions](https://github.com/aoppenh1-afk/J.A.R.I.S/actions/runs/38100866104). Tests, packaging, archive creation, signing, and publication passed without Apple credentials. Apple certificate import and notarization were skipped as intended.
-- [Checks](https://github.com/aoppenh1-afk/J.A.R.I.S/actions/runs/38100702620) passed for the implementation, including tests, personal packaging, ZIP/DMG generation, and the Git history secret scan.
+- [Version 0.2.0, build 1001](https://github.com/aoppenh1-afk/Siri-2.0/releases/tag/v0.2.0) was built and published by [GitHub Actions](https://github.com/aoppenh1-afk/Siri-2.0/actions/runs/38100866104). Tests, packaging, archive creation, signing, and publication passed without Apple credentials. Apple certificate import and notarization were skipped as intended.
+- [Checks](https://github.com/aoppenh1-afk/Siri-2.0/actions/runs/38100702620) passed for the implementation, including tests, personal packaging, ZIP/DMG generation, and the Git history secret scan.
 - The configured `releases/latest/download/appcast.xml` feed and its ZIP downloaded without a GitHub token. The downloaded app's public key matches the trusted source. The archive and feed signatures both verify.
 - The release includes a ZIP, DMG, and signed appcast. The existing installed app still needs to be replaced once with the updater-enabled build.

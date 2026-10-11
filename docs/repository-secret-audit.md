@@ -1,6 +1,6 @@
 # Repository secret audit
 
-On October 10, 2026, before changing `aoppenh1-afk/J.A.R.I.S` from private to public:
+On October 10, 2026, before changing `aoppenh1-afk/J.A.R.I.S` from private to public, the following checks ran. The same repository has since been renamed to [Siri-2.0](https://github.com/aoppenh1-afk/Siri-2.0).
 
 - Fetched the current remote branch and tags, and scanned all 35 commits reachable from local and remote refs with Gitleaks 8.30.1.
 - Scanned a copy of the 153 tracked and new working files, excluding ignored local configuration and build output.

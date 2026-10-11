@@ -92,4 +92,4 @@ The **Models** pane loads Hermes's configured provider catalog and lets you choo
 
 Jarvis includes Sparkle updates and a GitHub Actions release pipeline. Personal releases work without a paid Apple developer account and use the configured Ed25519 update key. Apple Developer ID signing and notarization are optional. The repository is public after a [secret audit](docs/repository-secret-audit.md). See [update setup and release instructions](docs/updates.md) for the one-time installation of the first build containing the updater and macOS approval for personal builds.
 
-Download the updater-enabled app from [GitHub Releases](https://github.com/aoppenh1-afk/J.A.R.I.S/releases/latest). Install it once; subsequent tagged versions are built on GitHub and offered through Jarvis's update controls.
+Download the updater-enabled app from [GitHub Releases](https://github.com/aoppenh1-afk/Siri-2.0/releases/latest). Install it once; subsequent tagged versions are built on GitHub and offered through Jarvis's update controls.

@@ -56,6 +56,7 @@ struct JarvisApp: App {
     @StateObject private var updater = AppUpdater()
     @State private var appearance: AppAppearance
     private let orbWindowController: FloatingOrbWindowController
+    private let setupWindowController: SetupWindowController
 
     private static let menuBarIcon: NSImage = {
         let url = JarvisResources.bundle.url(forResource: "MenuBarIconTemplate", withExtension: "tiff")
@@ -81,13 +82,16 @@ struct JarvisApp: App {
         let preferences = AppPreferencesStore.load()
         let model = AppModel(config: preferences.makeConfig())
         let orbWindowController = FloatingOrbWindowController(model: model)
+        let setupWindowController = SetupWindowController(model: model)
         _model = StateObject(wrappedValue: model)
         _appearance = State(initialValue: preferences.appearance)
         self.orbWindowController = orbWindowController
+        self.setupWindowController = setupWindowController
         let initialAppearance = preferences.appearance
         DispatchQueue.main.async {
             JarvisTheme.applyAppearance(initialAppearance)
             orbWindowController.start()
+            setupWindowController.start()
         }
     }
 

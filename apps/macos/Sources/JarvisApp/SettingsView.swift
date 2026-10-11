@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import JarvisCore
 import SwiftUI
@@ -210,7 +211,10 @@ struct SettingsView: View {
                                 Text("Normal").tag(AppConfig.CaptureProfile.normal)
                                 Text("Noisy room").tag(AppConfig.CaptureProfile.noisy)
                             }
-                            TextField("Parakeet model path", text: $settings.preferences.parakeetModelPath)
+                            HStack {
+                                TextField("Parakeet model path", text: $settings.preferences.parakeetModelPath)
+                                Button("Choose folder…") { chooseModelFolder() }
+                            }
                             Picker("Compute units", selection: $settings.preferences.parakeetComputeUnits) {
                                 Text("Apple Neural Engine").tag("ane")
                                 Text("GPU").tag("gpu")
@@ -275,8 +279,8 @@ struct SettingsView: View {
                     if selectedPane == .advanced {
                         Section("Diagnostics") {
                             LabeledContent("Parakeet model") {
-                                Text(FileManager.default.fileExists(atPath: settings.preferences.parakeetModelPath) ? "Found" : "Missing")
-                                .foregroundStyle(FileManager.default.fileExists(atPath: settings.preferences.parakeetModelPath) ? Color.green : Color.red)
+                                Text(localModelFilesReady ? "Files ready" : "Incomplete")
+                                .foregroundStyle(localModelFilesReady ? Color.green : Color.red)
                             }
                             LabeledContent("Deepgram credential") {
                                 Text(settings.deepgramAPIKey.isEmpty ? "Not configured" : "Stored in Keychain")
@@ -317,6 +321,19 @@ struct SettingsView: View {
     private var statusColor: Color {
         if case .failed = settings.saveState { return .red }
         return .secondary
+    }
+
+    private var localModelFilesReady: Bool {
+        let path = (settings.preferences.parakeetModelPath as NSString).expandingTildeInPath
+        return (try? ParakeetModelCacheValidator.validate(at: URL(fileURLWithPath: path))) != nil
+    }
+
+    private func chooseModelFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url { settings.preferences.parakeetModelPath = url.path }
     }
 
     @ViewBuilder

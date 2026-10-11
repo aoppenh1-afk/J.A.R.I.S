@@ -39,5 +39,9 @@ let package = Package(
             name: "JarvisCoreTests",
             dependencies: ["JarvisCore"]
         ),
+        .testTarget(
+            name: "JarvisAppTests",
+            dependencies: ["JarvisApp", "JarvisCore"]
+        ),
     ]
 )

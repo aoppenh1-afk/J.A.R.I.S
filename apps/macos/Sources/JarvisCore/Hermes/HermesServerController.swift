@@ -28,6 +28,7 @@ public actor HermesServerController {
     private let apiKey: String
     private let executableOverride: String?
     private let session: URLSession
+    private let redirectPolicy = HermesRedirectPolicy()
     private let onUnexpectedExit: ExitHandler?
     private var process: Process?
     private var restartLimiter = RestartRateLimiter(maximumStarts: 3, window: 60)
@@ -54,6 +55,7 @@ public actor HermesServerController {
     }
 
     public func ensureAvailable() async throws {
+        try HermesRuntimeConfiguration.validateEndpoint(baseURL)
         if let process, !process.isRunning {
             self.process = nil
         }
@@ -73,10 +75,10 @@ public actor HermesServerController {
             throw HermesServerError.managedEndpointOccupied
         }
         guard baseURL.scheme == "http",
-              let host = baseURL.host,
-              host == "127.0.0.1" || host == "localhost" || host == "::1" else {
+              let endpointHost = baseURL.host else {
             throw HermesServerError.autoStartRequiresLoopbackHTTP
         }
+        let host = endpointHost == "[::1]" ? "::1" : endpointHost.lowercased()
         guard let port = baseURL.port else {
             throw HermesServerError.missingPort
         }
@@ -120,7 +122,7 @@ public actor HermesServerController {
 
         do {
             try await waitUntilReady(for: process, collector: collector)
-            restartLimiter.reset()
+            // Readiness can precede a crash. Keep every start in the rolling window.
         } catch {
             stopOwnedProcess()
             throw error
@@ -199,7 +201,7 @@ public actor HermesServerController {
         var request = URLRequest(url: baseURL.appending(path: "health"))
         request.timeoutInterval = 1
         do {
-            let (_, response) = try await session.data(for: request)
+            let (_, response) = try await session.data(for: request, delegate: redirectPolicy)
             return response is HTTPURLResponse
         } catch {
             return false
@@ -211,7 +213,7 @@ public actor HermesServerController {
         request.timeoutInterval = 1
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: request, delegate: redirectPolicy)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { return false }
             return Self.isCompatibleCapabilitiesResponse(data)
         } catch {
@@ -220,15 +222,7 @@ public actor HermesServerController {
     }
 
     private func locateExecutable() -> URL? {
-        let candidates = [
-            executableOverride,
-            FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin/hermes").path,
-            "/opt/homebrew/bin/hermes",
-            "/usr/local/bin/hermes",
-        ].compactMap { $0 }
-
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-            .map(URL.init(fileURLWithPath:))
+        HermesRuntimeConfiguration.locateExecutable(override: executableOverride)
     }
 
     static func launchArguments() -> [String] {

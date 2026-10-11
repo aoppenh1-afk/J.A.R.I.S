@@ -280,8 +280,12 @@ public actor VoicePipeline {
         await publish {
             $0.metrics.hermesCompletionMilliseconds = hermesStart.duration(to: clock.now).milliseconds
         }
+        try Task.checkCancellation()
+        guard gate.accepts(runID: run.runID, generation: active.value) else { return }
         if terminalEvent == nil {
             let reconciled = try await hermes.getRun(runID: run.runID)
+            try Task.checkCancellation()
+            guard gate.accepts(runID: run.runID, generation: active.value) else { return }
             guard reconciled.status == "completed" else {
                 throw HermesClientError.streamClosedWithoutTerminalEvent
             }
@@ -299,6 +303,8 @@ public actor VoicePipeline {
         let visibleTail = responseFilter.finish()
         if !visibleTail.isEmpty {
             await publish { $0.assistantText += visibleTail }
+            try Task.checkCancellation()
+            guard gate.accepts(runID: run.runID, generation: active.value) else { return }
             if speakResponse {
                 for sentence in sentenceBuffer.append(visibleTail) {
                     speechContinuation?.yield(sentence)
@@ -315,9 +321,15 @@ public actor VoicePipeline {
             $0.followUpPrompts = presentation.followUpPrompts
         }
 
+        try Task.checkCancellation()
+        guard gate.accepts(runID: run.runID, generation: active.value) else { return }
+
         recordCompletedTurn(userText: text)
         lastExchangeUptime = uptime()
         await onConversationContextChanged(conversationContext)
+
+        try Task.checkCancellation()
+        guard gate.accepts(runID: run.runID, generation: active.value) else { return }
 
         if speakResponse {
             if let remainder = sentenceBuffer.flush() {

@@ -76,6 +76,47 @@ private actor ControlledHermes: HermesServicing {
     }
 }
 
+private actor ReconcilingHermes: HermesServicing {
+    private let onReconciliation: @Sendable () -> Void
+    private var pending: CheckedContinuation<HermesRun, Never>?
+    private var runCount = 0
+
+    init(onReconciliation: @escaping @Sendable () -> Void = {}) {
+        self.onReconciliation = onReconciliation
+    }
+
+    func health() -> [String: String] { ["status": "ok"] }
+    func capabilities() -> Data { Data() }
+    func createRun(input: String, sessionID: String?) -> HermesRun {
+        runCount += 1
+        return HermesRun(runID: "run-\(runCount)", status: "running", sessionID: sessionID, output: nil, error: nil, lastEvent: nil)
+    }
+    func streamEvents(runID: String) -> AsyncThrowingStream<HermesEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+    func getRun(runID: String) async -> HermesRun {
+        if runID == "run-1" {
+            return await withCheckedContinuation { continuation in
+                pending = continuation
+                onReconciliation()
+            }
+        }
+        return HermesRun(runID: runID, status: "completed", sessionID: nil, output: "Current answer.", error: nil, lastEvent: "run.completed")
+    }
+    func stopRun(runID: String) {}
+    func respondToApproval(runID: String, choice: HermesApprovalChoice) {}
+    func resolve(status: String = "completed") {
+        pending?.resume(returning: HermesRun(runID: "run-1", status: status, sessionID: nil, output: "Stale prior answer.", error: nil, lastEvent: nil))
+        pending = nil
+    }
+}
+
+private actor ContextRecorder {
+    private var updates: [[ConversationTurn]] = []
+    func record(_ turns: [ConversationTurn]) { updates.append(turns) }
+    func recordedUpdates() -> [[ConversationTurn]] { updates }
+}
+
 private actor RecordingHermes: HermesServicing {
     private var sessionIDs: [String?] = []
 
@@ -193,6 +234,85 @@ private final class SlowSynthesizer: SpeechSynthesizing {
 }
 
 final class VoicePipelineTests: XCTestCase {
+    @MainActor
+    func testLateReconciliationCannotPublishSpeakOrPersistIntoListeningTurn() async {
+        for status in ["completed", "failed"] {
+            let requested = expectation(description: "Reconciliation started")
+            let hermes = ReconcilingHermes(onReconciliation: { requested.fulfill() })
+            let snapshots = SnapshotRecorder()
+            let contexts = ContextRecorder()
+            let synthesizer = RecordingSynthesizer()
+            let pipeline = VoicePipeline(
+                recognizer: StubRecognizer(), hermes: hermes, synthesizer: synthesizer,
+                onConversationContextChanged: { await contexts.record($0) },
+                onSnapshot: { await snapshots.record($0) }
+            )
+            let oldTurn = Task { await pipeline.submit(text: "Old request", speakResponse: true) }
+            await fulfillment(of: [requested], timeout: 1)
+            await pipeline.beginListening()
+            let listening = await snapshots.latest()
+            await hermes.resolve(status: status)
+            await oldTurn.value
+            let after = await snapshots.latest()
+            let updates = await contexts.recordedUpdates()
+            XCTAssertEqual(after, listening)
+            XCTAssertEqual(after?.state, .listening)
+            XCTAssertEqual(after?.assistantText, "")
+            XCTAssertTrue(updates.isEmpty)
+            XCTAssertTrue(synthesizer.spoken.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testLateReconciliationCannotOverwriteCompletedNewTurnOrItsContext() async {
+        let requested = expectation(description: "Old reconciliation started")
+        let hermes = ReconcilingHermes(onReconciliation: { requested.fulfill() })
+        let snapshots = SnapshotRecorder()
+        let contexts = ContextRecorder()
+        let synthesizer = RecordingSynthesizer()
+        let pipeline = VoicePipeline(
+            recognizer: StubRecognizer(), hermes: hermes, synthesizer: synthesizer,
+            onConversationContextChanged: { await contexts.record($0) },
+            onSnapshot: { await snapshots.record($0) }
+        )
+        let oldTurn = Task { await pipeline.submit(text: "Old request", speakResponse: true) }
+        await fulfillment(of: [requested], timeout: 1)
+        await pipeline.submit(text: "New request", speakResponse: true)
+        let current = await snapshots.latest()
+        await hermes.resolve()
+        await oldTurn.value
+        let after = await snapshots.latest()
+        let updates = await contexts.recordedUpdates()
+        XCTAssertEqual(after, current)
+        XCTAssertEqual(after?.assistantText, "Current answer.")
+        XCTAssertEqual(updates.count, 1)
+        XCTAssertEqual(updates.last?.map(\.userText), ["New request"])
+        XCTAssertEqual(updates.last?.map(\.assistantText), ["Current answer."])
+        XCTAssertEqual(synthesizer.spoken, ["Current answer."])
+    }
+
+    @MainActor
+    func testCurrentReconciliationStillCompletesAndRecordsItsResponse() async {
+        let requested = expectation(description: "Reconciliation started")
+        let hermes = ReconcilingHermes(onReconciliation: { requested.fulfill() })
+        let snapshots = SnapshotRecorder()
+        let contexts = ContextRecorder()
+        let pipeline = VoicePipeline(
+            recognizer: StubRecognizer(), hermes: hermes, synthesizer: RecordingSynthesizer(),
+            onConversationContextChanged: { await contexts.record($0) },
+            onSnapshot: { await snapshots.record($0) }
+        )
+        let turn = Task { await pipeline.submit(text: "Current request", speakResponse: false) }
+        await fulfillment(of: [requested], timeout: 1)
+        await hermes.resolve()
+        await turn.value
+        let latest = await snapshots.latest()
+        let updates = await contexts.recordedUpdates()
+        XCTAssertEqual(latest?.state, .idle)
+        XCTAssertEqual(latest?.assistantText, "Stale prior answer.")
+        XCTAssertEqual(updates.last?.map(\.userText), ["Current request"])
+    }
+
     @MainActor
     func testSpeaksCompleteSentenceBeforeRunCompletes() async throws {
         let hermes = ControlledHermes()

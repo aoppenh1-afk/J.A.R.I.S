@@ -31,6 +31,7 @@ public actor HermesClient: HermesServicing {
     private let sessionKey: String
     private let instructions: String?
     private let session: URLSession
+    private let redirectPolicy = HermesRedirectPolicy()
     private var modelSelection: HermesModelSelection
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -84,11 +85,12 @@ public actor HermesClient: HermesServicing {
     public func streamEvents(runID: String) async throws -> AsyncThrowingStream<HermesEvent, Error> {
         let request = try makeRequest(path: "/v1/runs/\(runID)/events", accept: "text/event-stream")
         let session = self.session
+        let redirectPolicy = self.redirectPolicy
 
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let (bytes, response) = try await session.bytes(for: request)
+                    let (bytes, response) = try await session.bytes(for: request, delegate: redirectPolicy)
                     guard let response = response as? HTTPURLResponse else {
                         throw HermesClientError.invalidResponse
                     }
@@ -149,7 +151,7 @@ public actor HermesClient: HermesServicing {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.data(for: request, delegate: redirectPolicy)
         guard let response = response as? HTTPURLResponse else {
             throw HermesClientError.invalidResponse
         }
@@ -161,15 +163,31 @@ public actor HermesClient: HermesServicing {
     }
 
     private func makeRequest(path: String, accept: String = "application/json") throws -> URLRequest {
+        try HermesRuntimeConfiguration.validateEndpoint(baseURL)
         guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
             throw HermesClientError.invalidResponse
         }
+        try HermesRuntimeConfiguration.validateEndpoint(url)
         var request = URLRequest(url: url)
         request.setValue(accept, forHTTPHeaderField: "Accept")
         request.setValue(sessionKey, forHTTPHeaderField: "X-Hermes-Session-Key")
         if let apiKey {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
+        return request
+    }
+}
+
+/// URLSession follows redirects by default, including custom session headers.
+final class HermesRedirectPolicy: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest
+    ) async -> URLRequest? {
+        guard let url = request.url,
+              (try? HermesRuntimeConfiguration.validateEndpoint(url)) != nil else { return nil }
         return request
     }
 }

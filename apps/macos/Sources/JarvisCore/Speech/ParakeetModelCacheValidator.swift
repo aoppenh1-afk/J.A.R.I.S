@@ -16,7 +16,11 @@ public enum ParakeetModelCacheValidator {
 
     public static func validate(at rootURL: URL, fileManager: FileManager = .default) throws {
         let missingPaths = requiredRelativePaths.filter { relativePath in
-            !fileManager.fileExists(atPath: rootURL.appending(path: relativePath).path)
+            let url = rootURL.appending(path: relativePath).resolvingSymlinksInPath()
+            guard fileManager.isReadableFile(atPath: url.path),
+                  let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  values.isRegularFile == true, (values.fileSize ?? 0) > 0 else { return true }
+            return false
         }
         guard missingPaths.isEmpty else {
             throw ParakeetModelCacheError.incomplete(

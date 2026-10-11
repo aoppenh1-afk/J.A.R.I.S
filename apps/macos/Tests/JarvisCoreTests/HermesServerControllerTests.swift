@@ -38,6 +38,74 @@ final class HermesServerControllerTests: XCTestCase {
         )
     }
 
+    func testReadyThenCrashCyclesRemainRateLimited() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "jarvis-crash-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appending(path: "hermes")
+        let exitMarker = directory.appending(path: "exit")
+        try """
+        #!/bin/sh
+        while [ ! -f "${0%/*}/exit" ]; do /bin/sleep 0.01; done
+        exit 23
+
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        HermesServerURLProtocol.handler = { request in
+            if request.url?.path == "/health" { throw URLError(.cannotConnectToHost) }
+            return (Self.response(for: request, status: 200), Self.compatibleCapabilities())
+        }
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL, apiKey: "test-key",
+            executableOverride: executable.path, session: makeSession(), readinessTimeout: .seconds(2)
+        )
+        do {
+            for count in 1...3 {
+                try await controller.ensureAvailable()
+                let ready = await controller.processStatus()
+                XCTAssertTrue(ready.ownedProcessRunning)
+                XCTAssertEqual(ready.totalStartCount, count)
+                try Data().write(to: exitMarker)
+                let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+                while await controller.processStatus().unexpectedExitCount < count, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                let crashed = await controller.processStatus()
+                XCTAssertEqual(crashed.unexpectedExitCount, count)
+                XCTAssertFalse(crashed.ownedProcessRunning)
+                try FileManager.default.removeItem(at: exitMarker)
+            }
+            do {
+                try await controller.ensureAvailable()
+                XCTFail("A fourth ready-then-crash launch must be rejected")
+            } catch let error as HermesServerError {
+                XCTAssertEqual(error, .restartRateLimited)
+            }
+            let limited = await controller.processStatus()
+            XCTAssertEqual(limited.totalStartCount, 3)
+        } catch {
+            await controller.shutdown()
+            throw error
+        }
+        await controller.shutdown()
+    }
+
+    func testRemoteReadinessNeverSendsCredentials() async throws {
+        HermesServerURLProtocol.handler = { _ in
+            XCTFail("A remote endpoint must be rejected before a request is sent")
+            throw URLError(.badURL)
+        }
+        let controller = HermesServerController(
+            baseURL: URL(string: "https://outside.invalid")!, apiKey: "test-key", session: makeSession()
+        )
+        do {
+            try await controller.ensureAvailable()
+            XCTFail("Expected loopback validation")
+        } catch let error as AppConfigError {
+            XCTAssertEqual(error, .hermesMustUseLoopback)
+        }
+    }
+
     func testFastLauncherExitReportsItsOutputWithoutWaitingForDeadline() async throws {
         HermesServerURLProtocol.handler = { _ in throw URLError(.cannotConnectToHost) }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

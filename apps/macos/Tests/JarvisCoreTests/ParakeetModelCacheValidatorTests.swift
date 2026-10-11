@@ -32,6 +32,33 @@ final class ParakeetModelCacheValidatorTests: XCTestCase {
         }
     }
 
+    func testRejectsEmptyFilesAndDirectoriesDisguisedAsModelAssets() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for relativePath in ParakeetModelCacheValidator.requiredRelativePaths {
+            let url = root.appending(path: relativePath)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: url)
+        }
+        let tokenizer = root.appending(path: "tokenizer.json")
+        try FileManager.default.removeItem(at: tokenizer)
+        try FileManager.default.createDirectory(at: tokenizer, withIntermediateDirectories: true)
+        XCTAssertThrowsError(try ParakeetModelCacheValidator.validate(at: root))
+    }
+
+    func testAcceptsReadableSymlinksInHuggingFaceCaches() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let blob = root.appending(path: "blob")
+        try Data([1]).write(to: blob)
+        for relativePath in ParakeetModelCacheValidator.requiredRelativePaths {
+            let url = root.appending(path: relativePath)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.createSymbolicLink(at: url, withDestinationURL: blob)
+        }
+        XCTAssertNoThrow(try ParakeetModelCacheValidator.validate(at: root))
+    }
+
     private func makeTemporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appending(path: "jarvis-model-cache-\(UUID().uuidString)")

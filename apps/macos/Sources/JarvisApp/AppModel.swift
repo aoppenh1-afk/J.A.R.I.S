@@ -46,6 +46,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var animationQuality: AnimationQuality
     @Published private(set) var lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
     @Published var isFloatingOrbVisible = false
+    @Published private(set) var needsSetup: Bool
+    @Published var isSetupPresented: Bool
     private enum VoiceCaptureOrigin {
         case hotkey
         case orb
@@ -110,6 +112,8 @@ final class AppModel: ObservableObject {
         self.pipeline = runtime.pipeline
         self.localRecognizer = runtime.localRecognizer
         self.currentConfig = config
+        self.needsSetup = !FirstRunSetupStore.isComplete()
+        self.isSetupPresented = !FirstRunSetupStore.isComplete()
         self.persistsHistory = persistsHistory
         self.orbVisibility = preferences.orbVisibility
         self.speakTypedResponses = preferences.speakTypedResponses
@@ -123,6 +127,9 @@ final class AppModel: ObservableObject {
             self.history = persistsHistory ? ConversationHistoryStore.load() : []
         }
         self.hotkeyLabel = config.hotkey.displayName
+        if needsSetup {
+            self.snapshot.statusText = "Complete setup to start J.A.R.V.I.S."
+        }
         snapshotRelay.owner = self
         observeLifecycle()
         observeConnectivity()
@@ -140,26 +147,19 @@ final class AppModel: ObservableObject {
     }
 
     func start() async {
-        guard !started else { return }
+        guard !started, !needsSetup else { return }
         started = true
         recordDiagnostic(.appStarted)
-
-        let microphoneAllowed = await AVCaptureDevice.requestAccess(for: .audio)
-        if microphoneAllowed {
-            runtimeHealth.microphone = .healthy
-            recordDiagnostic(.microphoneAvailable)
-        } else {
-            runtimeHealth.microphone = .unavailable
-            recordDiagnostic(.microphoneUnavailable)
-        }
+        refreshMicrophoneAuthorization(recoverAfterChange: false)
 
         do {
             snapshot.state = .starting
             snapshot.statusText = "Starting Hermes"
+            try currentConfig.validate()
             try await hermesServer.ensureAvailable()
             runtimeHealth.hermes = .healthy
-            try registerHotkey(currentConfig.hotkey)
             try await pipeline.prepareOrThrow()
+            try registerHotkey(currentConfig.hotkey)
             runtimeHealth.audio = .healthy
         } catch {
             if runtimeHealth.hermes != .healthy {
@@ -167,7 +167,57 @@ final class AppModel: ObservableObject {
             }
             snapshot.state = .error
             snapshot.statusText = AppErrorFormatter.displayMessage(for: error)
+            started = false
+            hotkey.unregister()
+            await hermesServer.shutdown()
+            needsSetup = true
+            isSetupPresented = true
         }
+    }
+
+    func requestMicrophoneAccess() async -> Bool {
+        let allowed = await AVCaptureDevice.requestAccess(for: .audio)
+        refreshMicrophoneAuthorization()
+        return allowed
+    }
+
+    func completeSetup(preferences: AppPreferences, deepgramAPIKey: String) async throws {
+        guard !isApplyingSettings else { throw AppModelError.settingsApplicationInProgress }
+        var normalized = preferences
+        normalized.hermesBaseURL = preferences.hermesBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalized.parakeetModelPath = (preferences.parakeetModelPath.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
+        guard let endpoint = URL(string: normalized.hermesBaseURL) else { throw AppConfigError.hermesMustUseLoopback }
+        try HermesRuntimeConfiguration.validateEndpoint(endpoint)
+        var config = normalized.makeConfig()
+        let trimmedKey = deepgramAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.deepgramAPIKey = trimmedKey.isEmpty ? nil : trimmedKey
+        try config.validate()
+        let previousKey = InstallationIdentity.deepgramAPIKey()
+        let credentialChanged = previousKey != config.deepgramAPIKey
+        if credentialChanged && !AppPreferencesStore.saveDeepgramAPIKey(config.deepgramAPIKey) {
+            throw NSError(domain: "JarvisSetup", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Could not save the Deepgram API key in Keychain.",
+            ])
+        }
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        needsSetup = true
+        do {
+            try await apply(preferences: normalized)
+            guard AppPreferencesStore.save(normalized) else {
+                throw NSError(domain: "JarvisSetup", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: "Setup could not be saved. Try again.",
+                ])
+            }
+        } catch {
+            if credentialChanged { _ = AppPreferencesStore.saveDeepgramAPIKey(previousKey) }
+            throw error
+        }
+        FirstRunSetupStore.markComplete()
+        needsSetup = false
+        isSetupPresented = false
+        refreshMicrophoneAuthorization(recoverAfterChange: false)
+        snapshot.statusText = runtimeHealth.microphone == .healthy ? "Ready" : "Ready for typing; microphone unavailable"
     }
 
     func apply(preferences: AppPreferences) async throws {
@@ -191,7 +241,7 @@ final class AppModel: ObservableObject {
         isApplyingSettings = true
         defer { isApplyingSettings = false }
 
-        if !config.requiresRuntimeRebuild(comparedTo: currentConfig) {
+        if started, !needsSetup, !config.requiresRuntimeRebuild(comparedTo: currentConfig) {
             if config.hotkey != currentConfig.hotkey {
                 if hotkeyDown { stopCurrentTurn() }
                 try registerHotkey(config.hotkey)
@@ -234,6 +284,9 @@ final class AppModel: ObservableObject {
             currentConfig = config
             hotkeyLabel = config.hotkey.displayName
             lastArchivedGeneration = nil
+            started = true
+            runtimeHealth.hermes = .healthy
+            runtimeHealth.audio = .healthy
 
             if !reusesHermesServer {
                 await previousServer.shutdown()
@@ -242,9 +295,10 @@ final class AppModel: ObservableObject {
             snapshot.state = .idle
             snapshot.statusText = "Settings applied"
         } catch {
-            try? registerHotkey(currentConfig.hotkey)
+            if started { try? registerHotkey(currentConfig.hotkey) }
+            else { hotkey.unregister() }
             await candidate.pipeline.shutdown()
-            if !reusesHermesServer {
+            if !started || !reusesHermesServer {
                 await candidate.hermesServer.shutdown()
             }
             snapshot.state = .error
@@ -306,6 +360,7 @@ final class AppModel: ObservableObject {
 
     var canSubmitText: Bool {
         started
+            && !needsSetup
             && !isApplyingSettings
             && !isSleeping
             && snapshot.state != .starting
@@ -408,6 +463,12 @@ final class AppModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    var microphoneNeedsPermissionRequest: Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
+    }
+
+    var isPreparingSetup: Bool { needsSetup && isApplyingSettings }
+
     func clearDiagnostics() {
         diagnosticBuffer.clear()
         diagnosticEvents = []
@@ -471,7 +532,7 @@ final class AppModel: ObservableObject {
                     }
                     self.networkWasUnavailable = true
                     self.runtimeHealth.network = .unavailable
-                    if self.snapshot.state != .listening {
+                    if self.started, !self.needsSetup, self.snapshot.state != .listening {
                         self.snapshot.state = .degraded
                         self.snapshot.statusText = "Network unavailable"
                     }
@@ -523,14 +584,14 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func refreshMicrophoneAuthorization() {
+    private func refreshMicrophoneAuthorization(recoverAfterChange: Bool = true) {
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         let isAuthorized = status == .authorized
         if isAuthorized {
             if runtimeHealth.microphone != .healthy {
                 recordDiagnostic(.microphoneAvailable)
                 runtimeHealth.microphone = .healthy
-                recoverRuntime(reason: "microphone permission restoration", debounce: false)
+                if recoverAfterChange { recoverRuntime(reason: "microphone permission restoration", debounce: false) }
             }
         } else {
             if runtimeHealth.microphone != .unavailable {
@@ -579,7 +640,7 @@ final class AppModel: ObservableObject {
     }
 
     private func recoverRuntime(reason: String, debounce: Bool) {
-        guard started, !isSleeping, !isApplyingSettings else { return }
+        guard started, !needsSetup, !isSleeping, !isApplyingSettings else { return }
         recoveryTask?.cancel()
         recoveryTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -654,6 +715,7 @@ final class AppModel: ObservableObject {
 
     private func hotkeyPressed(origin: VoiceCaptureOrigin) {
         guard !hotkeyDown,
+              started, !needsSetup,
               !isApplyingSettings,
               !isSleeping,
               runtimeHealth.audio != .recovering,

@@ -28,7 +28,7 @@ public enum AppErrorFormatter {
             case .localModeCannotFallback:
                 return "Local speech mode does not support cloud fallback."
             case .hermesMustUseLoopback:
-                return "Hermes endpoint must use a local loopback address (127.0.0.1 or localhost)."
+                return "Hermes requires an HTTP or HTTPS loopback URL using 127.0.0.1, localhost, or ::1, without credentials in the URL."
             }
         }
 

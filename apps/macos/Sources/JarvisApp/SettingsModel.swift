@@ -17,18 +17,23 @@ final class SettingsModel: ObservableObject {
     @Published private(set) var modelError = ""
 
     private var savedDraft: SettingsDraft
+    private let modelSession: URLSession
     private let onApply: @MainActor (AppPreferences) async throws -> Void
     private lazy var autosaver = SettingsAutosaver<SettingsDraft>(
         apply: { [weak self] draft in try await self?.save(draft) },
         onState: { [weak self] state in self?.saveState = state }
     )
 
-    init(onApply: @escaping @MainActor (AppPreferences) async throws -> Void) {
-        let preferences = AppPreferencesStore.load()
-        let apiKey = InstallationIdentity.deepgramAPIKey() ?? ""
+    init(
+        preferences: AppPreferences = AppPreferencesStore.load(),
+        deepgramAPIKey: String = InstallationIdentity.deepgramAPIKey() ?? "",
+        modelSession: URLSession = .shared,
+        onApply: @escaping @MainActor (AppPreferences) async throws -> Void
+    ) {
         self.preferences = preferences
-        self.deepgramAPIKey = apiKey
-        self.savedDraft = SettingsDraft(preferences: preferences, apiKey: apiKey)
+        self.deepgramAPIKey = deepgramAPIKey
+        self.savedDraft = SettingsDraft(preferences: preferences, apiKey: deepgramAPIKey)
+        self.modelSession = modelSession
         self.onApply = onApply
     }
 
@@ -62,15 +67,20 @@ final class SettingsModel: ObservableObject {
         modelError = ""
         defer { isLoadingModels = false }
         do {
+            guard let endpoint = URL(string: preferences.hermesBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                throw SettingsError.invalidEndpoint
+            }
+            try HermesRuntimeConfiguration.validateEndpoint(endpoint)
             let config = preferences.makeConfig()
             let client = HermesClient(
-                baseURL: config.hermesBaseURL,
+                baseURL: endpoint,
                 apiKey: config.hermesAPIKey,
-                sessionKey: config.hermesSessionKey
+                sessionKey: config.hermesSessionKey,
+                session: modelSession
             )
             catalog = try await client.modelCatalog(refresh: refresh)
         } catch {
-            modelError = "Could not load Hermes models. Make sure Hermes is running and supports /api/model/options. You can still enter a provider and model ID below."
+            modelError = "Could not load Hermes models: \(AppErrorFormatter.displayMessage(for: error)) You can still enter a provider and model ID below."
         }
     }
 
@@ -82,7 +92,7 @@ final class SettingsModel: ObservableObject {
         var normalized = draft
         normalized.apiKey = draft.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         normalized.preferences.hermesBaseURL = draft.preferences.hermesBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        normalized.preferences.parakeetModelPath = draft.preferences.parakeetModelPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalized.preferences.parakeetModelPath = (draft.preferences.parakeetModelPath.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
         normalized.preferences.agentModel.provider = draft.preferences.agentModel.provider.trimmingCharacters(in: .whitespacesAndNewlines)
         normalized.preferences.agentModel.model = draft.preferences.agentModel.model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard normalized != savedDraft else { return }

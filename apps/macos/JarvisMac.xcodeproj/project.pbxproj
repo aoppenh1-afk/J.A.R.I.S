@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		16B304137B10D5098961A7D0 /* SetupWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12DFEA6753440C6E7592D2A6 /* SetupWindowController.swift */; };
 		1FEE59A0750C148DFB10CE60 /* GlassVoiceOrbStudy in Resources */ = {isa = PBXBuildFile; fileRef = 5DB736E42F1FFC496A8EED43 /* GlassVoiceOrbStudy */; };
 		2E27AFC710B44610212D7831 /* JarvisApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78909E291BDCD91604175655 /* JarvisApp.swift */; };
 		2E946FA7F67CF872C54DF6CB /* PopoverChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F6824D7A0409E46199415FD /* PopoverChrome.swift */; };
@@ -24,6 +25,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		12DFEA6753440C6E7592D2A6 /* SetupWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupWindowController.swift; sourceTree = "<group>"; };
 		13EA4D209E2964456FA606E1 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		24B587E5EC541AB1178EEF3B /* macos */ = {isa = PBXFileReference; lastKnownFileType = folder; name = macos; path = .; sourceTree = SOURCE_ROOT; };
 		2A62551113547A229E846ED0 /* MenuBarIconTemplate@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "MenuBarIconTemplate@2x.png"; sourceTree = "<group>"; };
@@ -73,6 +75,7 @@
 				4F6824D7A0409E46199415FD /* PopoverChrome.swift */,
 				C13F180A1CE25A3FE5BEF555 /* SettingsModel.swift */,
 				8D20D423D2917FD0051EC878 /* SettingsView.swift */,
+				12DFEA6753440C6E7592D2A6 /* SetupWindowController.swift */,
 				A5BAC4C86D2E5A93A917A88B /* Resources */,
 			);
 			path = JarvisApp;
@@ -202,6 +205,7 @@
 				2E946FA7F67CF872C54DF6CB /* PopoverChrome.swift in Sources */,
 				4A46C8983FA53E591D93BD5F /* SettingsModel.swift in Sources */,
 				704658620BC71844266C1CB3 /* SettingsView.swift in Sources */,
+				16B304137B10D5098961A7D0 /* SetupWindowController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

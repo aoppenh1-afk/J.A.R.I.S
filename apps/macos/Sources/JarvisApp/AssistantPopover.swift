@@ -18,6 +18,10 @@ struct AssistantPopover: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
+                    if model.needsSetup {
+                        Button("Complete setup…") { model.isSetupPresented = true }
+                            .buttonStyle(.borderedProminent)
+                    }
                     if model.runtimeHealth.microphone == .unavailable {
                         microphoneWarning
                     }
@@ -112,6 +116,8 @@ struct AssistantPopover: View {
             .help("Settings")
 
             Menu {
+                Button("Set up J.A.R.V.I.S.…") { model.isSetupPresented = true }
+                Divider()
                 Button("New conversation") { model.newConversation() }
                 Button("Clear transcript history") { model.clearHistory() }
                     .disabled(model.history.isEmpty)
@@ -549,7 +555,13 @@ struct AssistantPopover: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Open Settings") { model.openMicrophoneSettings() }
+            Button(model.microphoneNeedsPermissionRequest ? "Allow microphone" : "Open Settings") {
+                if model.microphoneNeedsPermissionRequest {
+                    Task { _ = await model.requestMicrophoneAccess() }
+                } else {
+                    model.openMicrophoneSettings()
+                }
+            }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
         }

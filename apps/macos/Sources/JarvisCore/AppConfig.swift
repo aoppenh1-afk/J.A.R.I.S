@@ -5,12 +5,31 @@ public enum HermesRuntimeConfiguration {
     public static let legacyManagedBaseURL = URL(string: "http://127.0.0.1:8642")!
     public static let managedBaseURL = URL(string: "http://127.0.0.1:8643")!
 
+    /// Apply this before attaching credentials, including to redirected requests.
+    public static func validateEndpoint(_ url: URL) throws {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: true),
+              components.scheme == "http" || components.scheme == "https",
+              ["127.0.0.1", "localhost", "::1", "[::1]"].contains(components.host?.lowercased() ?? ""),
+              components.user == nil, components.password == nil else {
+            throw AppConfigError.hermesMustUseLoopback
+        }
+    }
+
+    public static func locateExecutable(
+        override: String? = ProcessInfo.processInfo.environment["JARVIS_HERMES_EXECUTABLE"],
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        fileManager: FileManager = .default
+    ) -> URL? {
+        [override, homeDirectory.appending(path: ".local/bin/hermes").path,
+         "/opt/homebrew/bin/hermes", "/usr/local/bin/hermes"]
+            .compactMap { $0 }
+            .first { fileManager.isExecutableFile(atPath: $0) }
+            .map(URL.init(fileURLWithPath:))
+    }
+
     public static func isManagedEndpoint(_ url: URL) -> Bool {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
-        let isLoopback = components.host == "127.0.0.1"
-            || components.host == "localhost"
-            || components.host == "::1"
-            || components.host == "[::1]"
+        let isLoopback = ["127.0.0.1", "localhost", "::1", "[::1]"].contains(components.host?.lowercased() ?? "")
         return components.scheme == "http"
             && isLoopback
             && components.port == 8643
@@ -23,10 +42,7 @@ public enum HermesRuntimeConfiguration {
 
     public static func isLegacyManagedEndpoint(_ url: URL) -> Bool {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
-        let isLoopback = components.host == "127.0.0.1"
-            || components.host == "localhost"
-            || components.host == "::1"
-            || components.host == "[::1]"
+        let isLoopback = ["127.0.0.1", "localhost", "::1", "[::1]"].contains(components.host?.lowercased() ?? "")
         return components.scheme == "http"
             && isLoopback
             && components.port == 8642
@@ -120,9 +136,7 @@ public struct AppConfig: Sendable, Equatable {
         if speechMode == .auto && allowCloudFallback && deepgramAPIKey?.isEmpty != false {
             throw AppConfigError.cloudFallbackRequiresDeepgramKey
         }
-        guard hermesBaseURL.host == "127.0.0.1" || hermesBaseURL.host == "localhost" || hermesBaseURL.host == "::1" else {
-            throw AppConfigError.hermesMustUseLoopback
-        }
+        try HermesRuntimeConfiguration.validateEndpoint(hermesBaseURL)
     }
 
     /// Hotkey and agent model changes do not require reloading speech models.

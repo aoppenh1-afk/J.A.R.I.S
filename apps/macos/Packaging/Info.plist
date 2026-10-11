@@ -29,7 +29,7 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>J.A.R.V.I.S. uses the microphone only while you hold the configured push-to-talk hotkey.</string>
+	<string>J.A.R.V.I.S. uses the microphone when you hold the push-to-talk hotkey or start a recording with the voice orb.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>SUFeedURL</key>

@@ -47,6 +47,54 @@ final class HermesClientTests: XCTestCase {
         super.tearDown()
     }
 
+    func testEveryAuthenticatedRouteRejectsRemoteEndpointsBeforeSendingARequest() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HermesClientURLProtocol.self]
+        HermesClientURLProtocol.handler = { _ in
+            XCTFail("No request may be sent to an invalid endpoint")
+            throw URLError(.badURL)
+        }
+        let client = HermesClient(
+            baseURL: URL(string: "https://outside.invalid")!, apiKey: "dummy-key",
+            sessionKey: "dummy-session", session: URLSession(configuration: configuration)
+        )
+        let operations: [() async throws -> Void] = [
+            { _ = try await client.health() },
+            { _ = try await client.capabilities() },
+            { _ = try await client.modelCatalog(refresh: true) },
+            { _ = try await client.createRun(input: "test", sessionID: nil) },
+            { _ = try await client.streamEvents(runID: "run-1") },
+            { _ = try await client.getRun(runID: "run-1") },
+            { try await client.stopRun(runID: "run-1") },
+            { try await client.respondToApproval(runID: "run-1", choice: .deny) },
+        ]
+        for operation in operations {
+            do {
+                try await operation()
+                XCTFail("Expected loopback validation")
+            } catch let error as AppConfigError {
+                XCTAssertEqual(error, .hermesMustUseLoopback)
+            }
+        }
+    }
+
+    func testRedirectPolicyRejectsRemoteDestinationWithSessionHeaders() async throws {
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let originalURL = URL(string: "http://127.0.0.1:8643/api/model/options")!
+        let task = session.dataTask(with: originalURL)
+        let response = HTTPURLResponse(url: originalURL, statusCode: 302, httpVersion: nil, headerFields: nil)!
+        var redirected = URLRequest(url: URL(string: "https://outside.invalid/models")!)
+        redirected.setValue("dummy-session", forHTTPHeaderField: "X-Hermes-Session-Key")
+        redirected.setValue("Bearer dummy-key", forHTTPHeaderField: "Authorization")
+        let policy = HermesRedirectPolicy()
+        let rejected = await policy.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: redirected)
+        XCTAssertNil(rejected)
+        redirected.url = URL(string: "http://localhost:8643/api/model/options/")!
+        let allowed = await policy.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: redirected)
+        XCTAssertEqual(allowed?.url, redirected.url)
+    }
+
     func testRunInstructionsDistinguishDefaultBrowserFromAutomationBrowser() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [HermesClientURLProtocol.self]

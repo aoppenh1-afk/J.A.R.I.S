@@ -53,7 +53,7 @@ final class AppErrorFormatterTests: XCTestCase {
 
     func testFormatsAppConfigErrors() {
         let configError = AppConfigError.hermesMustUseLoopback
-        XCTAssertEqual(AppErrorFormatter.displayMessage(for: configError), "Hermes endpoint must use a local loopback address (127.0.0.1 or localhost).")
+        XCTAssertEqual(AppErrorFormatter.displayMessage(for: configError), "Hermes requires an HTTP or HTTPS loopback URL using 127.0.0.1, localhost, or ::1, without credentials in the URL.")
     }
 
     func testIsManagedEndpointAcceptsLoopbackVariants() {

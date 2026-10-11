@@ -20,6 +20,8 @@ public actor VoicePipeline {
     private var speechContextID: UUID?
     private var speechContinuation: AsyncStream<String>.Continuation?
     private var speechTask: Task<Void, Error>?
+    private var promptTask: Task<Void, Error>?
+    private var snapshotDeliveryTask: Task<Void, Never>?
 
     public init(
         recognizer: any SpeechRecognizing,
@@ -40,7 +42,7 @@ public actor VoicePipeline {
         self.sessionID = sessionID
         self.conversationTimeout = conversationTimeout
         self.uptime = uptime
-        self.conversationContext = conversationContext
+        self.conversationContext = ConversationContextStore.bounded(conversationContext)
         if !conversationContext.isEmpty, let conversationContextUpdatedAt {
             let elapsed = max(0, Date.now.timeIntervalSince(conversationContextUpdatedAt))
             self.lastExchangeUptime = uptime() - elapsed
@@ -56,6 +58,10 @@ public actor VoicePipeline {
         } catch {
             await fail(error)
         }
+    }
+
+    public func setModelSelection(_ selection: HermesModelSelection) async {
+        await hermes.setModelSelection(selection)
     }
 
     public func prepareOrThrow() async throws {
@@ -126,7 +132,7 @@ public actor VoicePipeline {
                 $0.state = .thinking
                 $0.statusText = "Hermes is thinking"
             }
-            try await processPrompt(text, generation: generation, speakResponse: true, clock: clock)
+            try await runPrompt(text, generation: generation, speakResponse: true, clock: clock)
         } catch {
             await handleSubmissionFailure(error, generation: generation, includeRoutingStatus: true)
         }
@@ -155,7 +161,7 @@ public actor VoicePipeline {
         }
 
         do {
-            try await processPrompt(
+            try await runPrompt(
                 text,
                 generation: generation,
                 speakResponse: speakResponse,
@@ -163,6 +169,24 @@ public actor VoicePipeline {
             )
         } catch {
             await handleSubmissionFailure(error, generation: generation, includeRoutingStatus: false)
+        }
+    }
+
+    private func runPrompt(
+        _ text: String,
+        generation: Int,
+        speakResponse: Bool,
+        clock: ContinuousClock
+    ) async throws {
+        let task = Task {
+            try await processPrompt(text, generation: generation, speakResponse: speakResponse, clock: clock)
+        }
+        promptTask = task
+        defer { if gate.value == generation { promptTask = nil } }
+        try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
         }
     }
 
@@ -207,6 +231,8 @@ public actor VoicePipeline {
         var terminalOutput: String?
 
         for try await event in stream {
+            try Task.checkCancellation()
+            guard gate.value == active.value else { break }
             guard gate.accepts(runID: event.runID, generation: active.value) else { continue }
             if event.event == "message.delta", let delta = event.delta {
                 let isFirstDelta = !receivedDelta
@@ -219,7 +245,8 @@ public actor VoicePipeline {
                     }
                 }
                 if !visibleDelta.isEmpty {
-                    await publish { $0.assistantText += visibleDelta }
+                    snapshot.assistantText += visibleDelta
+                    scheduleSnapshotDelivery()
                     if speakResponse {
                         let sentences = sentenceBuffer.append(visibleDelta)
                         for sentence in sentences {
@@ -248,6 +275,7 @@ public actor VoicePipeline {
             }
         }
 
+        try Task.checkCancellation()
         guard gate.accepts(runID: run.runID, generation: active.value) else { return }
         await publish {
             $0.metrics.hermesCompletionMilliseconds = hermesStart.duration(to: clock.now).milliseconds
@@ -338,12 +366,17 @@ public actor VoicePipeline {
             provider: snapshot.speechProvider,
             sources: snapshot.sources
         ))
+        conversationContext = ConversationContextStore.bounded(conversationContext)
     }
 
     private func interruptActiveTurn() async -> Int? {
         let clock = ContinuousClock()
         let interruptionStart = clock.now
         let interrupted = gate.invalidate()
+        promptTask?.cancel()
+        promptTask = nil
+        snapshotDeliveryTask?.cancel()
+        snapshotDeliveryTask = nil
         let hadActiveOutput = interrupted != nil || speechContextID != nil || speechTask != nil
         await stopSpeech()
 
@@ -389,6 +422,10 @@ public actor VoicePipeline {
 
     public func newConversation() async {
         let interrupted = gate.invalidate()
+        promptTask?.cancel()
+        promptTask = nil
+        snapshotDeliveryTask?.cancel()
+        snapshotDeliveryTask = nil
         await stopSpeech()
         if let interrupted {
             try? await hermes.stopRun(runID: interrupted.runID)
@@ -401,8 +438,23 @@ public actor VoicePipeline {
         await onSnapshot(snapshot)
     }
 
+    public func cancelCurrentTurn() async {
+        _ = await interruptActiveTurn()
+        await publish {
+            $0.state = .idle
+            $0.statusText = "Stopped"
+            $0.activeRunID = nil
+            $0.approval = nil
+            for index in $0.toolActivities.indices where $0.toolActivities[index].state == .running {
+                $0.toolActivities[index].state = .cancelled
+            }
+        }
+    }
+
     public func shutdown() async {
         let interrupted = gate.invalidate()
+        promptTask?.cancel()
+        promptTask = nil
         await stopSpeech()
         if let interrupted {
             try? await hermes.stopRun(runID: interrupted.runID)
@@ -435,11 +487,19 @@ public actor VoicePipeline {
         speechContinuation?.finish()
         speechContinuation = nil
         let task = speechTask
-        speechTask = nil
-        try await task?.value
-        if let contextID = speechContextID {
+        let contextID = speechContextID
+        try await withTaskCancellationHandler {
+            try await task?.value
+        } onCancel: {
+            task?.cancel()
+        }
+        try Task.checkCancellation()
+        guard speechContextID == contextID else { return }
+        if let contextID {
             try await synthesizer.finish(contextID: contextID)
         }
+        guard speechContextID == contextID else { return }
+        speechTask = nil
         speechContextID = nil
     }
 
@@ -522,7 +582,24 @@ public actor VoicePipeline {
     }
 
     private func publish(_ update: (inout VoiceSnapshot) -> Void) async {
+        snapshotDeliveryTask?.cancel()
+        snapshotDeliveryTask = nil
         update(&snapshot)
+        await onSnapshot(snapshot)
+    }
+
+    private func scheduleSnapshotDelivery() {
+        guard snapshotDeliveryTask == nil else { return }
+        let generation = gate.value
+        snapshotDeliveryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(33)) } catch { return }
+            await self?.deliverPendingSnapshot(generation: generation)
+        }
+    }
+
+    private func deliverPendingSnapshot(generation: Int) async {
+        guard !Task.isCancelled, gate.value == generation else { return }
+        snapshotDeliveryTask = nil
         await onSnapshot(snapshot)
     }
 }

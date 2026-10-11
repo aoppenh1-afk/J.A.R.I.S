@@ -66,6 +66,7 @@ public enum ToolActivityState: String, Sendable, Equatable {
     case running
     case completed
     case failed
+    case cancelled
 }
 
 public struct ToolActivity: Sendable, Equatable, Identifiable {

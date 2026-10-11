@@ -36,6 +36,7 @@ struct ExactGlassVoiceOrb: View {
     let state: VoiceState
     let assistantText: String
     let statusText: String
+    var framesPerSecond: Int = 30
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -44,7 +45,8 @@ struct ExactGlassVoiceOrb: View {
             state: state,
             assistantText: assistantText,
             statusText: statusText,
-            reduceMotion: reduceMotion
+            reduceMotion: reduceMotion,
+            framesPerSecond: framesPerSecond
         )
     }
 }
@@ -54,6 +56,7 @@ private struct GlassVoiceOrbWebView: NSViewRepresentable {
     let assistantText: String
     let statusText: String
     let reduceMotion: Bool
+    let framesPerSecond: Int
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -78,6 +81,7 @@ private struct GlassVoiceOrbWebView: NSViewRepresentable {
         context.coordinator.pendingAssistantText = assistantText
         context.coordinator.pendingStatusText = statusText
         context.coordinator.pendingReduceMotion = reduceMotion
+        context.coordinator.pendingFramesPerSecond = framesPerSecond
         GlassVoiceOrbAudioHub.shared.register(context.coordinator)
 
         if let url = URL(string: "jarvisorb://bundle/embed.html") {
@@ -91,7 +95,8 @@ private struct GlassVoiceOrbWebView: NSViewRepresentable {
             state: state,
             assistantText: assistantText,
             statusText: statusText,
-            reduceMotion: reduceMotion
+            reduceMotion: reduceMotion,
+            framesPerSecond: framesPerSecond
         )
     }
 
@@ -109,6 +114,7 @@ private struct GlassVoiceOrbWebView: NSViewRepresentable {
         var pendingAssistantText = ""
         var pendingStatusText = ""
         var pendingReduceMotion = false
+        var pendingFramesPerSecond = 30
 
         private var pageLoaded = false
         private var pendingRevision: UInt64 = 1
@@ -126,22 +132,26 @@ private struct GlassVoiceOrbWebView: NSViewRepresentable {
             state: VoiceState,
             assistantText: String,
             statusText: String,
-            reduceMotion: Bool
+            reduceMotion: Bool,
+            framesPerSecond: Int
         ) {
             guard state != pendingState
                     || assistantText != pendingAssistantText
                     || statusText != pendingStatusText
-                    || reduceMotion != pendingReduceMotion else { return }
+                    || reduceMotion != pendingReduceMotion
+                    || framesPerSecond != pendingFramesPerSecond else { return }
 
             pendingState = state
             pendingAssistantText = assistantText
             pendingStatusText = statusText
             pendingReduceMotion = reduceMotion
+            pendingFramesPerSecond = framesPerSecond
             pendingRevision &+= 1
             sendPendingState()
         }
 
         func receiveGlassVoiceOrbAudio(_ bands: AudioFrequencyBands) {
+            guard pendingFramesPerSecond > 0, !pendingReduceMotion else { return }
             guard bands != pendingAudioBands else { return }
             pendingAudioBands = bands
             schedulePendingAudio()
@@ -203,6 +213,7 @@ private struct GlassVoiceOrbWebView: NSViewRepresentable {
                 "assistantText": pendingAssistantText,
                 "statusText": pendingStatusText,
                 "reducedMotion": pendingReduceMotion,
+                "framesPerSecond": pendingFramesPerSecond,
             ]
             guard let data = try? JSONSerialization.data(withJSONObject: payload),
                   let json = String(data: data, encoding: .utf8) else { return }

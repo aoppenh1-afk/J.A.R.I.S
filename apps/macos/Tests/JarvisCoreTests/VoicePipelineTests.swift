@@ -154,6 +154,7 @@ private actor ResetCounter {
 
 private actor SnapshotRecorder {
     private var snapshots: [VoiceSnapshot] = []
+    func count() -> Int { snapshots.count }
 
     func record(_ snapshot: VoiceSnapshot) {
         snapshots.append(snapshot)
@@ -175,6 +176,20 @@ private final class RecordingSynthesizer: SpeechSynthesizing {
     func stop(contextID: UUID?) {
         stoppedContexts.append(contextID)
     }
+}
+
+@MainActor
+private final class SlowSynthesizer: SpeechSynthesizing {
+    private(set) var started = false
+    private(set) var wasCancelled = false
+    private(set) var finishedContexts: [UUID] = []
+    func speak(_ text: String, contextID: UUID) async throws {
+        started = true
+        do { try await Task.sleep(for: .seconds(10)) }
+        catch { wasCancelled = true; throw error }
+    }
+    func stop(contextID: UUID?) {}
+    func finish(contextID: UUID) { finishedContexts.append(contextID) }
 }
 
 final class VoicePipelineTests: XCTestCase {
@@ -564,6 +579,64 @@ final class VoicePipelineTests: XCTestCase {
     }
 
     @MainActor
+    func testInterruptionCancelsSilentEventStreamWithoutWaitingForServer() async {
+        let hermes = ControlledHermes()
+        let recorder = SnapshotRecorder()
+        let pipeline = VoicePipeline(
+            recognizer: StubRecognizer(), hermes: hermes, synthesizer: RecordingSynthesizer(),
+            onSnapshot: { await recorder.record($0) }
+        )
+        let finished = expectation(description: "Interrupted submission returns")
+        let submission = Task {
+            await pipeline.submit(text: "Wait for tools", speakResponse: false)
+            finished.fulfill()
+        }
+        while !(await hermes.isStreaming()) { await Task.yield() }
+        await pipeline.beginListening()
+        await fulfillment(of: [finished], timeout: 1)
+        let latest = await recorder.latest()
+        XCTAssertEqual(latest?.state, .listening)
+        XCTAssertNil(latest?.activeRunID)
+        submission.cancel()
+        await hermes.finish()
+        await submission.value
+    }
+
+    @MainActor
+    func testBurstOfTextIsCoalescedAndToolEventsStayImmediate() async {
+        let hermes = ControlledHermes()
+        let recorder = SnapshotRecorder()
+        let pipeline = VoicePipeline(
+            recognizer: StubRecognizer(), hermes: hermes, synthesizer: RecordingSynthesizer(),
+            onSnapshot: { await recorder.record($0) }
+        )
+        let submission = Task { await pipeline.submit(text: "Request", speakResponse: false) }
+        while !(await hermes.isStreaming()) { await Task.yield() }
+        for index in 0..<100 {
+            await hermes.send(HermesEvent(event: "message.delta", runID: "run-1", timestamp: Double(index), delta: "x"))
+        }
+        await hermes.send(HermesEvent(event: "tool.started", runID: "run-1", timestamp: 101, tool: "search"))
+        for _ in 0..<1_000 {
+            if await recorder.latest()?.state == .tool { break }
+            await Task.yield()
+        }
+        let toolSnapshot = await recorder.latest()
+        XCTAssertEqual(toolSnapshot?.state, .tool)
+        XCTAssertFalse(toolSnapshot?.assistantText.isEmpty ?? true)
+        XCTAssertTrue(String(repeating: "x", count: 100).hasPrefix(toolSnapshot?.assistantText ?? ""))
+        XCTAssertEqual(toolSnapshot?.toolActivities.first?.name, "search")
+        await hermes.send(HermesEvent(event: "run.completed", runID: "run-1", timestamp: 102,
+                                     output: String(repeating: "x", count: 100)))
+        await hermes.finish()
+        await submission.value
+        let count = await recorder.count()
+        let latest = await recorder.latest()
+        XCTAssertLessThan(count, 30)
+        XCTAssertEqual(latest?.assistantText, String(repeating: "x", count: 100))
+        XCTAssertEqual(latest?.state, .idle)
+    }
+
+    @MainActor
     func testBeginListeningStopsCurrentSpeechContext() async {
         let synthesizer = RecordingSynthesizer()
         let pipeline = VoicePipeline(
@@ -576,5 +649,68 @@ final class VoicePipelineTests: XCTestCase {
         await pipeline.beginListening()
 
         XCTAssertEqual(synthesizer.stoppedContexts.count, 1)
+    }
+
+    @MainActor
+    func testStopCancelsSpeechAfterHermesHasCompleted() async {
+        let hermes = ControlledHermes()
+        let synthesizer = SlowSynthesizer()
+        let recorder = SnapshotRecorder()
+        let pipeline = VoicePipeline(
+            recognizer: StubRecognizer(), hermes: hermes, synthesizer: synthesizer,
+            onSnapshot: { await recorder.record($0) }
+        )
+        let returned = expectation(description: "Playback submission cancels")
+        let submission = Task {
+            await pipeline.submit(text: "Speak a reply", speakResponse: true)
+            returned.fulfill()
+        }
+        while !(await hermes.isStreaming()) { await Task.yield() }
+        await hermes.send(HermesEvent(event: "run.completed", runID: "run-1", timestamp: 1, output: "Speaking."))
+        for _ in 0..<1_000 where !synthesizer.started { await Task.yield() }
+        XCTAssertTrue(synthesizer.started)
+        await pipeline.cancelCurrentTurn()
+        await fulfillment(of: [returned], timeout: 1)
+        let latest = await recorder.latest()
+        XCTAssertEqual(latest?.statusText, "Stopped")
+        XCTAssertTrue(synthesizer.wasCancelled)
+        XCTAssertTrue(synthesizer.finishedContexts.isEmpty)
+        submission.cancel()
+        await submission.value
+    }
+
+    @MainActor
+    func testStopCancelsToolAndPreservesPartialResponseWithoutRecordingIt() async {
+        let hermes = ControlledHermes()
+        let recorder = SnapshotRecorder()
+        let pipeline = VoicePipeline(
+            recognizer: StubRecognizer(), hermes: hermes, synthesizer: RecordingSynthesizer(),
+            onSnapshot: { await recorder.record($0) }
+        )
+        let submission = Task { await pipeline.submit(text: "Run tools", speakResponse: false) }
+        while !(await hermes.isStreaming()) { await Task.yield() }
+        await hermes.send(HermesEvent(event: "message.delta", runID: "run-1", timestamp: 1,
+                                     delta: "Partial answer that remains visible."))
+        await hermes.send(HermesEvent(event: "tool.started", runID: "run-1", timestamp: 2, tool: "search"))
+        for _ in 0..<1_000 {
+            if await recorder.latest()?.state == .tool { break }
+            await Task.yield()
+        }
+        await pipeline.cancelCurrentTurn()
+        await submission.value
+        let stopped = await recorder.latest()
+        XCTAssertEqual(stopped?.state, .idle)
+        XCTAssertEqual(stopped?.statusText, "Stopped")
+        XCTAssertNil(stopped?.activeRunID)
+        XCTAssertNil(stopped?.approval)
+        XCTAssertFalse(stopped?.assistantText.isEmpty ?? true)
+        XCTAssertEqual(stopped?.toolActivities.first?.state, .cancelled)
+
+        let followUp = Task { await pipeline.submit(text: "Next request", speakResponse: false) }
+        while await hermes.streamCount() < 2 { await Task.yield() }
+        let inputs = await hermes.recordedInputs()
+        XCTAssertEqual(inputs.last, "Next request")
+        await pipeline.cancelCurrentTurn()
+        await followUp.value
     }
 }

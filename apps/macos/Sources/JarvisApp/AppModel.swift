@@ -39,13 +39,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var runtimeHealth = RuntimeHealth()
     @Published private(set) var diagnosticEvents: [DiagnosticEvent] = []
     @Published private(set) var orbVisibility: OrbVisibility
-    @Published private(set) var voiceOrbStyle: VoiceOrbStyle
-    @Published private(set) var shuffleVoiceOrbs: Bool
-    @Published private(set) var shuffledVoiceOrbStyles: Set<VoiceOrbStyle>
     @Published private(set) var isVoiceInteraction = false
     @Published private(set) var speakTypedResponses: Bool
     @Published private(set) var automaticallySubmitOrbAfterSilence: Bool
     @Published private(set) var orbSilenceDuration: Double
+    @Published private(set) var animationQuality: AnimationQuality
+    @Published private(set) var lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+    @Published var isFloatingOrbVisible = false
     private enum VoiceCaptureOrigin {
         case hotkey
         case orb
@@ -54,6 +54,7 @@ final class AppModel: ObservableObject {
     private struct Runtime {
         let hermesServer: HermesServerController
         let pipeline: VoicePipeline
+        let localRecognizer: ParakeetRecognizer
     }
 
     private let capture: AudioCaptureService
@@ -61,6 +62,7 @@ final class AppModel: ObservableObject {
     private let snapshotRelay: SnapshotRelay
     private var hermesServer: HermesServerController
     private var pipeline: VoicePipeline
+    private var localRecognizer: ParakeetRecognizer
     private var currentConfig: AppConfig
     private var started = false
     private var hotkeyDown = false
@@ -70,6 +72,7 @@ final class AppModel: ObservableObject {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var audioObserver: NSObjectProtocol?
     private var applicationObserver: NSObjectProtocol?
+    private var powerObserver: NSObjectProtocol?
     private var recoveryTask: Task<Void, Never>?
     private var connectivityMonitor: ConnectivityMonitor?
     private let recoveryPolicy = RecoveryPolicy()
@@ -80,6 +83,7 @@ final class AppModel: ObservableObject {
     private var orbSpeechDetected = false
     private var silenceSubmissionTask: Task<Void, Never>?
     private var historyExpiryTask: Task<Void, Never>?
+    private var lastSpeechUptime: TimeInterval = 0
 
     init(config: AppConfig = AppConfig()) {
         let capture = AudioCaptureService()
@@ -104,15 +108,14 @@ final class AppModel: ObservableObject {
         self.snapshotRelay = snapshotRelay
         self.hermesServer = runtime.hermesServer
         self.pipeline = runtime.pipeline
+        self.localRecognizer = runtime.localRecognizer
         self.currentConfig = config
         self.persistsHistory = persistsHistory
         self.orbVisibility = preferences.orbVisibility
-        self.voiceOrbStyle = preferences.voiceOrbStyle
-        self.shuffleVoiceOrbs = preferences.shuffleVoiceOrbs
-        self.shuffledVoiceOrbStyles = preferences.shuffledVoiceOrbStyles
         self.speakTypedResponses = preferences.speakTypedResponses
         self.automaticallySubmitOrbAfterSilence = preferences.automaticallySubmitOrbAfterSilence
         self.orbSilenceDuration = preferences.orbSilenceDuration
+        self.animationQuality = preferences.animationQuality
         if contextExpired {
             ConversationHistoryStore.clear()
             self.history = []
@@ -168,14 +171,18 @@ final class AppModel: ObservableObject {
     }
 
     func apply(preferences: AppPreferences) async throws {
+        try await apply(config: preferences.makeConfig())
         orbVisibility = preferences.orbVisibility
-        voiceOrbStyle = preferences.voiceOrbStyle
-        shuffleVoiceOrbs = preferences.shuffleVoiceOrbs
-        shuffledVoiceOrbStyles = preferences.shuffledVoiceOrbStyles
         speakTypedResponses = preferences.speakTypedResponses
         automaticallySubmitOrbAfterSilence = preferences.automaticallySubmitOrbAfterSilence
         orbSilenceDuration = preferences.orbSilenceDuration
-        try await apply(config: preferences.makeConfig())
+        animationQuality = preferences.animationQuality
+        persistsHistory = preferences.persistTranscriptHistory
+        if persistsHistory {
+            _ = ConversationHistoryStore.save(history)
+        } else {
+            ConversationHistoryStore.clear()
+        }
     }
 
     func apply(config: AppConfig) async throws {
@@ -183,6 +190,18 @@ final class AppModel: ObservableObject {
         guard !isApplyingSettings else { throw AppModelError.settingsApplicationInProgress }
         isApplyingSettings = true
         defer { isApplyingSettings = false }
+
+        if !config.requiresRuntimeRebuild(comparedTo: currentConfig) {
+            if config.hotkey != currentConfig.hotkey {
+                if hotkeyDown { stopCurrentTurn() }
+                try registerHotkey(config.hotkey)
+            }
+            await pipeline.setModelSelection(config.agentModel)
+            currentConfig = config
+            hotkeyLabel = config.hotkey.displayName
+            recordDiagnostic(.settingsApplied)
+            return
+        }
 
         capture.cancel()
         hotkeyDown = false
@@ -196,7 +215,10 @@ final class AppModel: ObservableObject {
             snapshotRelay: snapshotRelay,
             conversationContext: conversationContext,
             conversationContextUpdatedAt: ConversationContextStore.lastUpdatedAt(),
-            hermesServer: reusesHermesServer ? previousServer : nil
+            hermesServer: reusesHermesServer ? previousServer : nil,
+            localRecognizer: config.parakeetModelPath == currentConfig.parakeetModelPath
+                && config.parakeetComputeUnits == currentConfig.parakeetComputeUnits
+                && config.captureProfile == currentConfig.captureProfile ? localRecognizer : nil
         )
 
         await previousPipeline.shutdown()
@@ -207,15 +229,10 @@ final class AppModel: ObservableObject {
             try registerHotkey(config.hotkey)
 
             pipeline = candidate.pipeline
+            localRecognizer = candidate.localRecognizer
             hermesServer = candidate.hermesServer
             currentConfig = config
             hotkeyLabel = config.hotkey.displayName
-            persistsHistory = AppPreferencesStore.load().persistTranscriptHistory
-            if !persistsHistory {
-                ConversationHistoryStore.clear()
-            } else {
-                _ = ConversationHistoryStore.save(history)
-            }
             lastArchivedGeneration = nil
 
             if !reusesHermesServer {
@@ -231,7 +248,7 @@ final class AppModel: ObservableObject {
                 await candidate.hermesServer.shutdown()
             }
             snapshot.state = .error
-            snapshot.statusText = "Settings saved but could not be applied: \(AppErrorFormatter.displayMessage(for: error))"
+            snapshot.statusText = "Could not apply settings: \(AppErrorFormatter.displayMessage(for: error))"
             throw error
         }
     }
@@ -293,6 +310,21 @@ final class AppModel: ObservableObject {
             && !isSleeping
             && snapshot.state != .starting
             && snapshot.state != .approval
+    }
+
+    var canStopCurrentTurn: Bool { isConversationActive(snapshot.state) }
+
+    func stopCurrentTurn() {
+        capture.cancel()
+        hotkeyDown = false
+        activeCaptureOrigin = nil
+        silenceSubmissionTask?.cancel()
+        silenceSubmissionTask = nil
+        GlassVoiceOrbAudioHub.shared.publish(.zero)
+        // A stopped response remains visible but is not a completed history turn.
+        lastArchivedGeneration = snapshot.generation
+        let pipeline = pipeline
+        Task { await pipeline.cancelCurrentTurn() }
     }
 
     @discardableResult
@@ -480,6 +512,15 @@ final class AppModel: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in self?.refreshMicrophoneAuthorization() }
         }
+        powerObserver = NotificationCenter.default.addObserver(
+            forName: .NSProcessInfoPowerStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+            }
+        }
     }
 
     private func refreshMicrophoneAuthorization() {
@@ -620,6 +661,7 @@ final class AppModel: ObservableObject {
         hotkeyDown = true
         isVoiceInteraction = true
         activeCaptureOrigin = origin
+        lastSpeechUptime = ProcessInfo.processInfo.systemUptime
         orbSpeechDetected = false
         silenceSubmissionTask?.cancel()
         silenceSubmissionTask = nil
@@ -648,22 +690,35 @@ final class AppModel: ObservableObject {
         // numeric-only updates while WebGL interpolates them at display refresh rate.
         GlassVoiceOrbAudioHub.shared.publish(signal.bands)
 
+        if signal.reachedRecordingLimit {
+            hotkeyReleased()
+            return
+        }
+
         guard activeCaptureOrigin == .orb,
               automaticallySubmitOrbAfterSilence else { return }
         let speechThreshold = Float(currentConfig.captureProfile.silenceRMSThreshold * 1.5)
         guard signal.rms >= speechThreshold else { return }
 
         orbSpeechDetected = true
-        silenceSubmissionTask?.cancel()
-        let delay = min(max(orbSilenceDuration, 0.5), 5)
+        lastSpeechUptime = ProcessInfo.processInfo.systemUptime
+        guard silenceSubmissionTask == nil else { return }
+        scheduleSilenceSubmission(after: min(max(orbSilenceDuration, 0.5), 5))
+    }
+
+    private func scheduleSilenceSubmission(after delay: TimeInterval) {
         silenceSubmissionTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(delay))
-            guard let self,
-                  !Task.isCancelled,
-                  self.hotkeyDown,
-                  self.activeCaptureOrigin == .orb,
-                  self.orbSpeechDetected else { return }
-            self.hotkeyReleased()
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard let self, self.hotkeyDown, self.activeCaptureOrigin == .orb,
+                  self.orbSpeechDetected, self.automaticallySubmitOrbAfterSilence else { return }
+            self.silenceSubmissionTask = nil
+            let target = min(max(self.orbSilenceDuration, 0.5), 5)
+            let silence = ProcessInfo.processInfo.systemUptime - self.lastSpeechUptime
+            if silence >= target {
+                self.hotkeyReleased()
+            } else {
+                self.scheduleSilenceSubmission(after: target - silence)
+            }
         }
     }
 
@@ -691,7 +746,8 @@ final class AppModel: ObservableObject {
         snapshotRelay: SnapshotRelay,
         conversationContext: [ConversationTurn],
         conversationContextUpdatedAt: Date?,
-        hermesServer suppliedServer: HermesServerController? = nil
+        hermesServer suppliedServer: HermesServerController? = nil,
+        localRecognizer suppliedRecognizer: ParakeetRecognizer? = nil
     ) -> Runtime {
         let apiKey = config.hermesAPIKey ?? InstallationIdentity.hermesAPIKey()
         let hermesServer = suppliedServer ?? HermesServerController(
@@ -701,7 +757,7 @@ final class AppModel: ObservableObject {
                 Task { @MainActor in snapshotRelay.hermesExited() }
             }
         )
-        let localRecognizer = ParakeetRecognizer(
+        let localRecognizer = suppliedRecognizer ?? ParakeetRecognizer(
             modelURL: config.parakeetModelPath,
             computeUnits: config.parakeetComputeUnits,
             silenceRMSThreshold: config.captureProfile.silenceRMSThreshold
@@ -725,7 +781,8 @@ final class AppModel: ObservableObject {
         let hermes = HermesClient(
             baseURL: config.hermesBaseURL,
             apiKey: apiKey,
-            sessionKey: config.hermesSessionKey
+            sessionKey: config.hermesSessionKey,
+            modelSelection: config.agentModel
         )
         let localSynthesizer = MacSpeechSynthesizer(voiceIdentifier: config.macVoiceIdentifier)
         let cloudSynthesizer: (any SpeechSynthesizing)?
@@ -758,6 +815,6 @@ final class AppModel: ObservableObject {
         ) { snapshot in
             await snapshotRelay.deliver(snapshot)
         }
-        return Runtime(hermesServer: hermesServer, pipeline: pipeline)
+        return Runtime(hermesServer: hermesServer, pipeline: pipeline, localRecognizer: localRecognizer)
     }
 }

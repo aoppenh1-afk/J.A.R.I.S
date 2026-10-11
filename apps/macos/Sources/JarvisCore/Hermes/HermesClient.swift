@@ -18,6 +18,11 @@ public protocol HermesServicing: Sendable {
     func getRun(runID: String) async throws -> HermesRun
     func stopRun(runID: String) async throws
     func respondToApproval(runID: String, choice: HermesApprovalChoice) async throws
+    func setModelSelection(_ selection: HermesModelSelection) async
+}
+
+public extension HermesServicing {
+    func setModelSelection(_ selection: HermesModelSelection) async {}
 }
 
 public actor HermesClient: HermesServicing {
@@ -26,6 +31,7 @@ public actor HermesClient: HermesServicing {
     private let sessionKey: String
     private let instructions: String?
     private let session: URLSession
+    private var modelSelection: HermesModelSelection
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
@@ -34,13 +40,15 @@ public actor HermesClient: HermesServicing {
         apiKey: String? = nil,
         sessionKey: String,
         instructions: String? = JarvisHermesInstructions.system,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        modelSelection: HermesModelSelection = .init()
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.sessionKey = sessionKey
         self.instructions = instructions
         self.session = session
+        self.modelSelection = modelSelection
     }
 
     public func health() async throws -> [String: String] {
@@ -52,10 +60,23 @@ public actor HermesClient: HermesServicing {
         try await request(path: "/v1/capabilities")
     }
 
+    public func modelCatalog(refresh: Bool = false) async throws -> HermesModelCatalog {
+        let data = try await request(path: refresh ? "/api/model/options?refresh=true" : "/api/model/options")
+        return try decoder.decode(HermesModelCatalog.self, from: data)
+    }
+
+    public func setModelSelection(_ selection: HermesModelSelection) async {
+        modelSelection = selection
+    }
+
     public func createRun(input: String, sessionID: String?) async throws -> HermesRun {
         var body = ["input": input]
         if let sessionID { body["session_id"] = sessionID }
         if let instructions { body["instructions"] = instructions }
+        let provider = modelSelection.provider.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = modelSelection.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !provider.isEmpty { body["provider"] = provider }
+        if !model.isEmpty { body["model"] = model }
         let data = try await request(path: "/v1/runs", method: "POST", json: body, expectedStatus: 202)
         return try decoder.decode(HermesRun.self, from: data)
     }

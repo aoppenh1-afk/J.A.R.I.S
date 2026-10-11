@@ -23,6 +23,27 @@ if [[ ! -d "$GLASS_ORB_RESOURCES" ]]; then
 fi
 
 plutil -lint "$INFO_PLIST"
+if [[ "${JARVIS_REQUIRE_UPDATER_CONFIGURATION:-0}" == "1" ]]; then
+  python3 - "$INFO_PLIST" <<'PY'
+import base64, plistlib, sys
+from urllib.parse import urlparse
+with open(sys.argv[1], 'rb') as source:
+    info = plistlib.load(source)
+feed = urlparse(info.get('SUFeedURL', ''))
+if feed.scheme != 'https' or not feed.netloc:
+    raise SystemExit('An HTTPS Sparkle feed is required.')
+if len(base64.b64decode(info.get('SUPublicEDKey', ''), validate=True)) != 32:
+    raise SystemExit('A valid Ed25519 update public key is required.')
+if not info.get('SUVerifyUpdateBeforeExtraction') or not info.get('SURequireSignedFeed'):
+    raise SystemExit('Update archives and feeds must require signature verification.')
+PY
+fi
+SPARKLE_FRAMEWORK="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+if [[ ! -d "$SPARKLE_FRAMEWORK" ]]; then
+  printf 'Sparkle.framework must be embedded in the application.\n' >&2
+  exit 1
+fi
+codesign --verify --deep --strict "$SPARKLE_FRAMEWORK"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$INFO_PLIST")" = "APPL"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$INFO_PLIST")" = "true"
 /usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$INFO_PLIST" >/dev/null

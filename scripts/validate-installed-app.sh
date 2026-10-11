@@ -44,14 +44,14 @@ if find "$APP_BUNDLE/Contents" -type f \( -name hermes -o -name python -o -name 
   exit 1
 fi
 
-if find "$APP_BUNDLE/Contents" -type f -perm -111 ! -path "$EXECUTABLE" -print -quit | grep -q .; then
+if find "$APP_BUNDLE/Contents" -type f -perm -111 ! -path "$EXECUTABLE" ! -path "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/*" -print -quit | grep -q .; then
   printf 'Unexpected nested executable found in the application bundle.\n' >&2
   exit 1
 fi
 
 printf '✓ bundle identity is resolved: %s\n' "$BUNDLE_IDENTIFIER"
 printf '✓ no development-path dynamic dependency was found\n'
-printf '✓ no model weights, Hermes copy, language runtime, or helper executable is bundled\n'
+printf '✓ no model weights, Hermes copy, language runtime, or unexpected executable is bundled\n'
 printf '✓ required Keychain, launch-at-login, hotkey, audio, and Core ML frameworks are linked\n'
 printf '\nPhysical checks still required on the installed signed build:\n'
 printf '  - Microphone permission is attributed to J.A.R.V.I.S.\n'

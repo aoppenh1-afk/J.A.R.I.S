@@ -44,14 +44,38 @@ public enum AudioInputFormatValidator {
 public struct AudioCaptureSignal: Sendable, Equatable {
     public let rms: Float
     public let bands: AudioFrequencyBands
+    public var reachedRecordingLimit: Bool
 
-    public init(rms: Float, bands: AudioFrequencyBands) {
+    public init(rms: Float, bands: AudioFrequencyBands, reachedRecordingLimit: Bool = false) {
         self.rms = rms
         self.bands = bands
+        self.reachedRecordingLimit = reachedRecordingLimit
     }
 
     static func analyze(samples: [Float], sampleRate: Double) -> AudioCaptureSignal {
         AudioSpectrumAnalyzer().analyze(samples: samples, sampleRate: sampleRate)
+    }
+}
+
+struct AudioRecordingBuffer {
+    static let maximumDuration: TimeInterval = 120
+    private(set) var samples: [Float] = []
+    let maximumSamples: Int
+
+    init(maximumSamples: Int = Int(maximumDuration * 16_000)) {
+        self.maximumSamples = max(0, maximumSamples)
+    }
+
+    mutating func append(_ incoming: UnsafeBufferPointer<Float>) -> Bool {
+        let remaining = max(0, maximumSamples - samples.count)
+        samples.append(contentsOf: incoming.prefix(remaining))
+        return samples.count == maximumSamples
+    }
+
+    mutating func takeSamples() -> [Float] {
+        let result = samples
+        samples = []
+        return result
     }
 }
 
@@ -178,12 +202,14 @@ private final class AudioSpectrumAnalyzer {
 public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
     private var engine: AVAudioEngine?
     private let lock = NSLock()
-    private var samples: [Float] = []
+    private var recording = AudioRecordingBuffer()
     private var converter: AVAudioConverter?
     private var targetFormat: AVAudioFormat?
+    private var conversionBuffer: AVAudioPCMBuffer?
     private let spectrumAnalyzer = AudioSpectrumAnalyzer()
     private var capturing = false
     private var tapInstalled = false
+    private var lastSignalUptime: TimeInterval = 0
 
     public init() {}
 
@@ -194,7 +220,11 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
     }
 
     public func start(onAudioLevel: (@Sendable (Float) -> Void)?) throws {
-        try start { signal in onAudioLevel?(signal.rms) }
+        if let onAudioLevel {
+            try start { signal in onAudioLevel(signal.rms) }
+        } else {
+            try start(onAudioSignal: nil)
+        }
     }
 
     public func start(onAudioSignal: (@Sendable (AudioCaptureSignal) -> Void)?) throws {
@@ -225,8 +255,9 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
                 throw AudioCaptureError.converterCreationFailed
             }
 
-            lock.withLock { samples.removeAll(keepingCapacity: true) }
+            lock.withLock { recording = AudioRecordingBuffer() }
             spectrumAnalyzer.reset()
+            lastSignalUptime = 0
             self.converter = converter
             self.targetFormat = targetFormat
             input.installTap(onBus: 0, bufferSize: 1_024, format: sourceFormat) { [weak self] buffer, _ in
@@ -246,7 +277,7 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
         let wasCapturing = capturing
         releaseAudioEngine()
         return lock.withLock {
-            defer { samples.removeAll(keepingCapacity: true) }
+            let samples = recording.takeSamples()
             return wasCapturing ? samples : []
         }
     }
@@ -261,6 +292,7 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
             tapInstalled = false
             converter = nil
             targetFormat = nil
+            conversionBuffer = nil
             spectrumAnalyzer.reset()
             return
         }
@@ -274,6 +306,7 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
         tapInstalled = false
         converter = nil
         targetFormat = nil
+        conversionBuffer = nil
         spectrumAnalyzer.reset()
     }
 
@@ -284,7 +317,11 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
         guard let converter, let targetFormat else { return }
         let ratio = targetFormat.sampleRate / input.format.sampleRate
         let capacity = AVAudioFrameCount((Double(input.frameLength) * ratio).rounded(.up)) + 1
-        guard let output = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
+        if (conversionBuffer?.frameCapacity ?? 0) < capacity {
+            conversionBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity)
+        }
+        guard let output = conversionBuffer else { return }
+        output.frameLength = 0
 
         var supplied = false
         var conversionError: NSError?
@@ -298,10 +335,15 @@ public final class AudioCaptureService: AudioCapturing, @unchecked Sendable {
             return input
         }
         guard status != .error, let channel = output.floatChannelData?.pointee else { return }
-        let converted = Array(UnsafeBufferPointer(start: channel, count: Int(output.frameLength)))
-        lock.withLock { samples.append(contentsOf: converted) }
-        guard !converted.isEmpty else { return }
-        onAudioSignal?(spectrumAnalyzer.analyze(samples: converted, sampleRate: targetFormat.sampleRate))
+        let converted = UnsafeBufferPointer(start: channel, count: Int(output.frameLength))
+        let reachedLimit = lock.withLock { recording.append(converted) }
+        guard !converted.isEmpty, let onAudioSignal else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard reachedLimit || now - lastSignalUptime >= 1.0 / 30.0 else { return }
+        lastSignalUptime = now
+        var signal = spectrumAnalyzer.analyze(samples: Array(converted), sampleRate: targetFormat.sampleRate)
+        signal.reachedRecordingLimit = reachedLimit
+        onAudioSignal(signal)
     }
 }
 

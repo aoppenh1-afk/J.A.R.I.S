@@ -5,6 +5,7 @@ import SwiftUI
 @main
 struct JarvisApp: App {
     @StateObject private var model: AppModel
+    @StateObject private var updater = AppUpdater()
     @State private var appearance: AppAppearance
     private let orbWindowController: FloatingOrbWindowController
 
@@ -42,7 +43,7 @@ struct JarvisApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            AssistantPopover(model: model)
+            AssistantPopover(model: model, updater: updater)
                 .jarvisMenuBarPanelStyle(appearance: appearance)
                 .onAppear { JarvisTheme.applyAppearance(appearance) }
                 .onChange(of: appearance) { _, next in
@@ -54,10 +55,10 @@ struct JarvisApp: App {
         .menuBarExtraStyle(.window)
 
         Settings {
-            SettingsView { preferences in
+            SettingsView(updater: updater) { preferences in
+                try await model.apply(preferences: preferences)
                 appearance = preferences.appearance
                 JarvisTheme.applyAppearance(preferences.appearance)
-                try await model.apply(preferences: preferences)
             }
             .preferredColorScheme(appearance.colorScheme)
             .onAppear { JarvisTheme.applyAppearance(appearance) }

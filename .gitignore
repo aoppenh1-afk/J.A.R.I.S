@@ -24,9 +24,17 @@ client_secret*.json
 # Python test cache
 .pytest_cache/
 .pytest-cache/
+__pycache__/
 
 # Runtime and release artifacts
 logs/
 run/
 coverage/
 dist/
+
+# Signing keys and certificate exports
+*.p12
+*.pfx
+*.pem
+*.key
+sparkle-private*

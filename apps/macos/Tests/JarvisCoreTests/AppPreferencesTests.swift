@@ -14,9 +14,6 @@ final class AppPreferencesTests: XCTestCase {
         preferences.speakTypedResponses = true
         preferences.appearance = .dark
         preferences.orbVisibility = .always
-        preferences.voiceOrbStyle = .glass
-        preferences.shuffleVoiceOrbs = true
-        preferences.shuffledVoiceOrbStyles = [.radial, .glass]
         preferences.automaticallySubmitOrbAfterSilence = false
         preferences.orbSilenceDuration = 2.25
 
@@ -122,34 +119,27 @@ final class AppPreferencesTests: XCTestCase {
         XCTAssertEqual(decoded.orbVisibility, .duringRun)
     }
 
-    func testMissingVoiceOrbPreferencesUseDefaults() throws {
-        let encoded = try JSONEncoder().encode(AppPreferences(
-            voiceOrbStyle: .glass,
-            shuffleVoiceOrbs: true,
-            shuffledVoiceOrbStyles: [.radial, .glass]
-        ))
+    func testLegacyOrbOptionsDoNotResetOtherPreferences() throws {
+        let encoded = try JSONEncoder().encode(AppPreferences(appearance: .dark))
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
-        object.removeValue(forKey: "voiceOrbStyle")
-        object.removeValue(forKey: "shuffleVoiceOrbs")
-        object.removeValue(forKey: "shuffledVoiceOrbStyles")
-        let legacyData = try JSONSerialization.data(withJSONObject: object)
-
-        let decoded = try JSONDecoder().decode(AppPreferences.self, from: legacyData)
-
-        XCTAssertEqual(decoded.voiceOrbStyle, .thinking)
-        XCTAssertFalse(decoded.shuffleVoiceOrbs)
-        XCTAssertEqual(decoded.shuffledVoiceOrbStyles, Set(VoiceOrbStyle.allCases))
+        object["voiceOrbStyle"] = "radial"
+        object["shuffleVoiceOrbs"] = true
+        object["shuffledVoiceOrbStyles"] = ["thinking", "radial", "cloud"]
+        let decoded = try JSONDecoder().decode(AppPreferences.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(decoded.appearance, .dark)
+        XCTAssertEqual(decoded.agentModel, HermesModelSelection())
+        let reencoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as? [String: Any])
+        XCTAssertNil(reencoded["voiceOrbStyle"])
+        XCTAssertNil(reencoded["shuffleVoiceOrbs"])
     }
 
-    func testEmptyShuffledVoiceOrbStylesFallBackToAllStyles() throws {
-        let encoded = try JSONEncoder().encode(AppPreferences())
-        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
-        object["shuffledVoiceOrbStyles"] = []
-        let data = try JSONSerialization.data(withJSONObject: object)
-
-        let decoded = try JSONDecoder().decode(AppPreferences.self, from: data)
-
-        XCTAssertEqual(decoded.shuffledVoiceOrbStyles, Set(VoiceOrbStyle.allCases))
+    func testPersistsAgentModelWithoutChangingSpeechRuntime() throws {
+        var preferences = AppPreferences()
+        preferences.agentModel = HermesModelSelection(provider: "anthropic", model: "claude-test")
+        let decoded = try JSONDecoder().decode(AppPreferences.self, from: JSONEncoder().encode(preferences))
+        XCTAssertEqual(decoded.agentModel, preferences.agentModel)
+        XCTAssertEqual(decoded.makeConfig().agentModel, preferences.agentModel)
+        XCTAssertFalse(decoded.makeConfig().requiresRuntimeRebuild(comparedTo: AppPreferences().makeConfig()))
     }
 
     func testMissingTypedSpeechPreferenceDefaultsToDisabled() throws {

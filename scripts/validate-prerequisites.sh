@@ -25,6 +25,7 @@ check_build() {
   fi
 
   check_tool swift
+  check_tool python3
   check_tool xcodebuild
   check_tool codesign
   check_tool plutil

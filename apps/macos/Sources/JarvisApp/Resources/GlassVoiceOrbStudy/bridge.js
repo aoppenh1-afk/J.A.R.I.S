@@ -92,6 +92,11 @@
   let nativeAudio = { low: 0, mid: 0, high: 0 };
   const renderedAudio = { low: 0, mid: 0, high: 0 };
   let reducedMotion = false;
+  let framesPerSecond = 30;
+  let frameTimer = null;
+  let animationFrame = null;
+  let ready = false;
+  let forceFrame = false;
   let lastFrame = performance.now();
   let shaderElapsed = 0;
   let resizeObserver;
@@ -133,9 +138,15 @@
 
   function update(payload) {
     const next = payload || {};
+    const previousMode = hostMode;
+    const previousFPS = framesPerSecond;
+    const previousReducedMotion = reducedMotion;
     hostMode = typeof next.mode === "string" ? next.mode : "idle";
     energy = Number.isFinite(next.energy) ? next.energy : energy;
     reducedMotion = Boolean(next.reducedMotion);
+    if (Number.isFinite(next.framesPerSecond)) {
+      framesPerSecond = Math.max(0, Math.min(60, next.framesPerSecond));
+    }
 
     const mode = upstreamMode(hostMode);
     const pressed = hostMode === "listening";
@@ -155,6 +166,12 @@
       reply.dataset.length = length > 420 ? "very-long" : length > 240 ? "long" : "normal";
       reply.textContent = text;
     }
+    if (hostMode !== previousMode || framesPerSecond !== previousFPS || reducedMotion !== previousReducedMotion
+        || reducedMotion || framesPerSecond === 0) {
+      scheduleFrame(true);
+    } else if (animationFrame === null && frameTimer === null) {
+      scheduleFrame();
+    }
   }
 
   window.jarvisOrb = {
@@ -171,23 +188,63 @@
         mode: hostMode,
         audio: nativeAudio,
         webgl2: Boolean(renderer.gl),
+        framesPerSecond: reducedMotion ? 0 : framesPerSecond,
+        paused: document.hidden,
       };
     },
   };
 
 
+  function scheduleFrame(immediate = false) {
+    if (!ready || document.hidden) return;
+    if (immediate) {
+      forceFrame = true;
+      clearTimeout(frameTimer);
+      frameTimer = null;
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+      animationFrame = requestAnimationFrame(frame);
+    } else if (!reducedMotion && framesPerSecond > 0) {
+      if (animationFrame !== null || frameTimer !== null) return;
+      if (framesPerSecond >= 60) {
+        animationFrame = requestAnimationFrame(frame);
+        return;
+      }
+      frameTimer = setTimeout(() => {
+        frameTimer = null;
+        animationFrame = requestAnimationFrame(frame);
+      }, Math.max(0, 1000 / framesPerSecond - 4 - (performance.now() - lastFrame)));
+    }
+  }
+
   function frame(now) {
-    const rawDelta = Math.min(0.05, (now - lastFrame) / 1000);
+    animationFrame = null;
+    if (!forceFrame && framesPerSecond > 0 && now - lastFrame < 1000 / framesPerSecond - 0.5) {
+      scheduleFrame();
+      return;
+    }
+    forceFrame = false;
+    const rawDelta = Math.min(0.2, (now - lastFrame) / 1000);
     lastFrame = now;
 
     shaderElapsed += rawDelta * motionScale();
     const audio = audioBands();
-    const channels = state.step(rawDelta, audio);
+    // The upstream springs use an analytical integrator. Static previews and
+    // Reduce Motion settle immediately rather than leaving transitions half open.
+    const channels = state.step(reducedMotion || framesPerSecond === 0 ? 10 : rawDelta, audio);
     channels.audio = audio;
     renderer.setFrame(channels, shaderElapsed);
     renderer.render();
-    requestAnimationFrame(frame);
+    scheduleFrame();
   }
+
+  document.addEventListener("visibilitychange", () => {
+    clearTimeout(frameTimer);
+    frameTimer = null;
+    if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+    animationFrame = null;
+    lastFrame = performance.now();
+    scheduleFrame(true);
+  });
 
   async function boot() {
     try {
@@ -198,15 +255,16 @@
       resizeObserver = new ResizeObserver(() => {
         syncHostLayout();
         renderer.resize();
+        scheduleFrame(true);
       });
       resizeObserver.observe(canvas);
 
       lastFrame = performance.now();
       shaderElapsed = 0;
+      ready = true;
       update({ mode: hostMode, energy, reducedMotion });
       document.documentElement.dataset.ready = "true";
       report("ready", JSON.stringify(window.jarvisOrb.status()));
-      requestAnimationFrame(frame);
     } catch (error) {
       document.documentElement.dataset.ready = "false";
       report("error", error?.stack || error);

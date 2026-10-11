@@ -89,4 +89,47 @@ final class HermesClientTests: XCTestCase {
 
         XCTAssertEqual(run.runID, "run-1")
     }
+
+    func testModelOverridesAreSentOnNextRunAndCanReturnToDefault() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HermesClientURLProtocol.self]
+        let client = HermesClient(
+            baseURL: URL(string: "http://127.0.0.1:8643")!, apiKey: "test-secret",
+            sessionKey: "test-session", session: URLSession(configuration: configuration)
+        )
+        var payloads: [[String: String]] = []
+        HermesClientURLProtocol.handler = { request in
+            payloads.append(try XCTUnwrap(JSONSerialization.jsonObject(with: hermesRequestBody(request)) as? [String: String]))
+            return (HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!,
+                    Data("{\"run_id\":\"run-model\",\"status\":\"queued\"}".utf8))
+        }
+        await client.setModelSelection(.init(provider: " anthropic ", model: " claude-test "))
+        _ = try await client.createRun(input: "Hello", sessionID: nil)
+        await client.setModelSelection(.init())
+        _ = try await client.createRun(input: "Hello again", sessionID: nil)
+        XCTAssertEqual(payloads[0]["provider"], "anthropic")
+        XCTAssertEqual(payloads[0]["model"], "claude-test")
+        XCTAssertNil(payloads[1]["provider"])
+        XCTAssertNil(payloads[1]["model"])
+    }
+
+    func testModelCatalogUsesAuthenticatedHermesInventoryAndExcludesLockedModels() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HermesClientURLProtocol.self]
+        let client = HermesClient(
+            baseURL: URL(string: "http://127.0.0.1:8643")!, apiKey: "test-secret",
+            sessionKey: "test-session", session: URLSession(configuration: configuration)
+        )
+        HermesClientURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/model/options")
+            XCTAssertEqual(request.url?.query, "refresh=true")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-secret")
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data(#"{"model":"model-a","provider":"nous","providers":[{"slug":"nous","name":"Nous","models":["model-a","model-b"],"authenticated":true,"unavailable_models":["model-b"]},{"slug":"other","name":"Other","models":[],"authenticated":false}]}"#.utf8))
+        }
+        let catalog = try await client.modelCatalog(refresh: true)
+        XCTAssertEqual(catalog.provider, "nous")
+        XCTAssertEqual(catalog.providers[0].availableModels, ["model-a"])
+        XCTAssertTrue(catalog.providers[0].isSelectable)
+        XCTAssertFalse(catalog.providers[1].isSelectable)
+    }
 }

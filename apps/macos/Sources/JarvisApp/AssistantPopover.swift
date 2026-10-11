@@ -4,6 +4,7 @@ import SwiftUI
 
 struct AssistantPopover: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var updater: AppUpdater
     @Environment(\.openSettings) private var openSettings
     @State private var draft = ""
     @State private var composerHeight: CGFloat = 36
@@ -71,6 +72,17 @@ struct AssistantPopover: View {
 
             Spacer(minLength: 8)
 
+            if model.canStopCurrentTurn {
+                Button { model.stopCurrentTurn() } label: {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.system(size: 16))
+                }
+                .buttonStyle(.plain)
+                .help("Stop listening, tools, and speech")
+                .accessibilityLabel("Stop current response")
+                .keyboardShortcut(.escape, modifiers: [])
+            }
+
             HStack(spacing: 7) {
                 Circle()
                     .fill(indicatorColor)
@@ -104,6 +116,8 @@ struct AssistantPopover: View {
                 Button("Clear transcript history") { model.clearHistory() }
                     .disabled(model.history.isEmpty)
                 Divider()
+                Button("Check for Updates…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
                 Button("Quit J.A.R.V.I.S.") { model.quit() }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -290,6 +304,10 @@ struct AssistantPopover: View {
                 .foregroundStyle(.white)
                 .frame(width: 16, height: 16)
                 .background(Color.red, in: Circle())
+        case .cancelled:
+            Image(systemName: "stop.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -330,6 +348,7 @@ struct AssistantPopover: View {
         case .running: "checking"
         case .completed: "done"
         case .failed: "failed"
+        case .cancelled: "stopped"
         }
     }
 
@@ -338,6 +357,7 @@ struct AssistantPopover: View {
         case .running: .secondary
         case .completed: .green
         case .failed: .red
+        case .cancelled: .secondary
         }
     }
 
@@ -347,9 +367,23 @@ struct AssistantPopover: View {
         heading: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text(heading)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
+            HStack {
+                Text(heading)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Copy response")
+                .accessibilityLabel("Copy response")
+            }
 
             Text(text)
                 .font(.system(size: 12))

@@ -72,6 +72,7 @@ public struct AppConfig: Sendable, Equatable {
     public var hermesBaseURL: URL
     public var hermesAPIKey: String?
     public var hermesSessionKey: String
+    public var agentModel: HermesModelSelection
 
     public init(
         speechMode: SpeechMode = .local,
@@ -90,7 +91,8 @@ public struct AppConfig: Sendable, Equatable {
             ?? HermesRuntimeConfiguration.managedBaseURL,
         hermesAPIKey: String? = ProcessInfo.processInfo.environment["JARVIS_HERMES_API_KEY"]
             ?? InstallationIdentity.hermesAPIKey(),
-        hermesSessionKey: String = InstallationIdentity.hermesSessionKey()
+        hermesSessionKey: String = InstallationIdentity.hermesSessionKey(),
+        agentModel: HermesModelSelection = .init()
     ) {
         self.speechMode = speechMode
         self.captureProfile = captureProfile
@@ -105,6 +107,7 @@ public struct AppConfig: Sendable, Equatable {
         self.hermesBaseURL = hermesBaseURL
         self.hermesAPIKey = hermesAPIKey
         self.hermesSessionKey = hermesSessionKey
+        self.agentModel = agentModel
     }
 
     public func validate() throws {
@@ -120,6 +123,14 @@ public struct AppConfig: Sendable, Equatable {
         guard hermesBaseURL.host == "127.0.0.1" || hermesBaseURL.host == "localhost" || hermesBaseURL.host == "::1" else {
             throw AppConfigError.hermesMustUseLoopback
         }
+    }
+
+    /// Hotkey and agent model changes do not require reloading speech models.
+    public func requiresRuntimeRebuild(comparedTo previous: AppConfig) -> Bool {
+        var comparable = self
+        comparable.hotkey = previous.hotkey
+        comparable.agentModel = previous.agentModel
+        return comparable != previous
     }
 }
 

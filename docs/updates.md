@@ -40,7 +40,7 @@ The marketing version comes from the tag. The build number is `1000 + GITHUB_RUN
 
 Install the first build containing Sparkle once. Later releases can be installed from inside Jarvis. The old installed app does not contain an updater and cannot discover its own replacement. Until the first release is published, the feed URL has no release asset to download.
 
-`Checks` runs tests, validates ad hoc packaging, and scans all fetched Git history for secrets on pushes and pull requests. Release jobs run only for tags or manual dispatch, never for pull requests.
+`Checks` uses an Apple Silicon macOS 26 runner with the SDK needed to compile the app’s Liquid Glass window chrome. It runs tests, validates ad hoc packaging, and scans all fetched Git history for secrets on pushes and pull requests. Release jobs run only for tags or manual dispatch, never for pull requests.
 
 ## Local validation
 

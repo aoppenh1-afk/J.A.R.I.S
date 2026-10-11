@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-26
     environment: release
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}

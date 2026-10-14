@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import JarvisCore
 
@@ -24,10 +25,33 @@ private final class HermesServerURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private final class HermesTestProcessState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: HermesManagedProcessIdentity?
+
+    init(_ identity: HermesManagedProcessIdentity) { value = identity }
+
+    func identity() -> HermesManagedProcessIdentity? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func exit() {
+        lock.lock()
+        defer { lock.unlock() }
+        value = nil
+    }
+}
+
 @MainActor
 final class HermesServerControllerTests: XCTestCase {
+    private var temporaryDirectories: [URL] = []
+
     override func tearDown() {
         HermesServerURLProtocol.handler = nil
+        for directory in temporaryDirectories { try? FileManager.default.removeItem(at: directory) }
+        temporaryDirectories = []
         super.tearDown()
     }
 
@@ -57,7 +81,8 @@ final class HermesServerControllerTests: XCTestCase {
         }
         let controller = HermesServerController(
             baseURL: HermesRuntimeConfiguration.managedBaseURL, apiKey: "test-key",
-            executableOverride: executable.path, session: makeSession(), readinessTimeout: .seconds(2)
+            executableOverride: executable.path, session: makeSession(), readinessTimeout: .seconds(2),
+            managedProcessInspector: makeUnoccupiedInspector()
         )
         do {
             for count in 1...3 {
@@ -121,7 +146,8 @@ final class HermesServerControllerTests: XCTestCase {
             apiKey: "test-key",
             executableOverride: executable.path,
             session: makeSession(),
-            readinessTimeout: .seconds(3)
+            readinessTimeout: .seconds(3),
+            managedProcessInspector: makeUnoccupiedInspector()
         )
         let start = ContinuousClock.now
         do {
@@ -169,7 +195,8 @@ final class HermesServerControllerTests: XCTestCase {
             baseURL: HermesRuntimeConfiguration.managedBaseURL,
             apiKey: "app-key",
             executableOverride: "/definitely/not/hermes",
-            session: session
+            session: session,
+            managedProcessInspector: HermesManagedProcessInspector(profileDirectory: URL(fileURLWithPath: "/missing/profile"))
         )
 
         do {
@@ -178,6 +205,285 @@ final class HermesServerControllerTests: XCTestCase {
         } catch let error as HermesServerError {
             XCTAssertEqual(error, .managedEndpointOccupied)
         }
+    }
+
+    func testManagedEndpointReusesVerifiedAuthenticatedServerAfterAppRestart() async throws {
+        HermesServerURLProtocol.handler = { request in
+            if request.url?.path == "/health" {
+                return (Self.response(for: request, status: 200), Data("{\"status\":\"ok\"}".utf8))
+            }
+            XCTAssertEqual(request.url?.path, "/v1/capabilities")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer app-key")
+            return (Self.response(for: request, status: 200), Self.compatibleCapabilities())
+        }
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL,
+            apiKey: "app-key",
+            executableOverride: "/definitely/not/hermes",
+            session: makeSession(),
+            managedProcessInspector: try makeInspector()
+        )
+
+        try await controller.ensureAvailable()
+        let status = await controller.processStatus()
+        XCTAssertEqual(status.totalStartCount, 0)
+        XCTAssertFalse(status.ownedProcessRunning)
+        await controller.shutdown()
+        try await controller.ensureAvailable()
+        await controller.shutdown()
+    }
+
+    func testCompatibleAPIWithoutProfileOwnershipIsStillRejected() async throws {
+        HermesServerURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/health", "Credentials must not be sent to an unverified listener")
+            return (Self.response(for: request, status: 200), Self.compatibleCapabilities())
+        }
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL, apiKey: "app-key",
+            session: makeSession(),
+            managedProcessInspector: HermesManagedProcessInspector(profileDirectory: URL(fileURLWithPath: "/missing/profile"))
+        )
+        do {
+            try await controller.ensureAvailable()
+            XCTFail("An API response alone cannot attest the jarvis profile")
+        } catch let error as HermesServerError {
+            XCTAssertEqual(error, .managedEndpointOccupied)
+        }
+    }
+
+    func testAuthenticatedServerWithLiveOwnerIsReusedWithoutSignalingIt() async throws {
+        var inspector = try makeInspector(parentPID: 123)
+        inspector.sendSignal = { _, _ in XCTFail("A live owner's gateway must not be signaled"); return false }
+        HermesServerURLProtocol.handler = { request in
+            (Self.response(for: request, status: 200), Self.compatibleCapabilities())
+        }
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL, apiKey: "app-key",
+            session: makeSession(), managedProcessInspector: inspector
+        )
+        try await controller.ensureAvailable()
+        await controller.shutdown()
+    }
+
+    func testWrongKeyNeverStopsGatewayWithLiveOwner() async throws {
+        var inspector = try makeInspector(parentPID: 123)
+        inspector.sendSignal = { _, _ in XCTFail("A live owner's gateway must not be signaled"); return false }
+        HermesServerURLProtocol.handler = { request in
+            (Self.response(for: request, status: request.url?.path == "/health" ? 200 : 401), Data())
+        }
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL, apiKey: "wrong-key",
+            session: makeSession(), managedProcessInspector: inspector
+        )
+        do {
+            try await controller.ensureAvailable()
+            XCTFail("Expected authentication failure")
+        } catch let error as HermesServerError {
+            XCTAssertEqual(error, .managedEndpointOccupied)
+        }
+    }
+
+    func testReusedGatewayExitNotifiesRecoveryOnce() async throws {
+        var inspector = try makeInspector()
+        let state = HermesTestProcessState(try XCTUnwrap(inspector.processIdentity(42)))
+        inspector.processIdentity = { _ in state.identity() }
+        HermesServerURLProtocol.handler = { request in
+            (Self.response(for: request, status: 200), Self.compatibleCapabilities())
+        }
+        let exited = expectation(description: "Reused gateway exit triggers app recovery")
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL, apiKey: "app-key",
+            session: makeSession(), onUnexpectedExit: { _ in exited.fulfill() },
+            managedProcessInspector: inspector
+        )
+        try await controller.ensureAvailable()
+        state.exit()
+        await fulfillment(of: [exited], timeout: 3)
+        let status = await controller.processStatus()
+        XCTAssertEqual(status.unexpectedExitCount, 1)
+        await controller.shutdown()
+    }
+
+    func testShutdownForcesUnresponsiveOwnedChildToExit() async throws {
+        let executable = try makeWaitingExecutable()
+        try """
+        #!/bin/sh
+        echo $$ > "${0%/*}/pid"
+        trap '' TERM
+        while :; do /bin/sleep 0.05; done
+
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        HermesServerURLProtocol.handler = { request in
+            if request.url?.path == "/health" { throw URLError(.cannotConnectToHost) }
+            return (Self.response(for: request, status: 200), Self.compatibleCapabilities())
+        }
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL, apiKey: "test-key",
+            executableOverride: executable.path, session: makeSession(), readinessTimeout: .seconds(2),
+            shutdownTimeout: .milliseconds(100), managedProcessInspector: makeUnoccupiedInspector()
+        )
+        try await controller.ensureAvailable()
+        let pidFile = executable.deletingLastPathComponent().appending(path: "pid")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !FileManager.default.fileExists(atPath: pidFile.path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let pid = try XCTUnwrap(Int32(String(contentsOf: pidFile).trimmingCharacters(in: .whitespacesAndNewlines)))
+        await controller.shutdown()
+        XCTAssertNil(HermesManagedProcessInspector.readProcessIdentity(pid))
+    }
+
+    func testConcurrentStartupLaunchesOnlyOneGateway() async throws {
+        let executable = try makeWaitingExecutable()
+        HermesServerURLProtocol.handler = { request in
+            Thread.sleep(forTimeInterval: 0.02)
+            if request.url?.path == "/health" { throw URLError(.cannotConnectToHost) }
+            return (Self.response(for: request, status: 200), Self.compatibleCapabilities())
+        }
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL, apiKey: "test-key",
+            executableOverride: executable.path, session: makeSession(), readinessTimeout: .seconds(2),
+            managedProcessInspector: makeUnoccupiedInspector()
+        )
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for _ in 0..<10 { group.addTask { try await controller.ensureAvailable() } }
+                try await group.waitForAll()
+            }
+            let status = await controller.processStatus()
+            XCTAssertEqual(status.totalStartCount, 1)
+            XCTAssertTrue(status.ownedProcessRunning)
+        } catch {
+            await controller.shutdown()
+            throw error
+        }
+        await controller.shutdown()
+    }
+
+    func testVerifiedOrphanWithOldKeyIsReplacedAutomatically() async throws {
+        let executable = try makeWaitingExecutable()
+        var inspector = try makeInspector()
+        let state = HermesTestProcessState(try XCTUnwrap(inspector.processIdentity(42)))
+        inspector.processIdentity = { _ in state.identity() }
+        inspector.sendSignal = { pid, signal in
+            XCTAssertEqual(pid, 42)
+            XCTAssertEqual(signal, SIGTERM)
+            state.exit()
+            return true
+        }
+        HermesServerURLProtocol.handler = { request in
+            if request.url?.path == "/health" {
+                if state.identity() == nil { throw URLError(.cannotConnectToHost) }
+                return (Self.response(for: request, status: 200), Data())
+            }
+            return (Self.response(for: request, status: state.identity() == nil ? 200 : 401), Self.compatibleCapabilities())
+        }
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL, apiKey: "new-key",
+            executableOverride: executable.path, session: makeSession(), readinessTimeout: .seconds(2),
+            managedProcessInspector: inspector
+        )
+        do {
+            try await controller.ensureAvailable()
+            let status = await controller.processStatus()
+            XCTAssertEqual(status.totalStartCount, 1)
+            XCTAssertTrue(status.ownedProcessRunning)
+            XCTAssertNil(state.identity())
+        } catch {
+            await controller.shutdown()
+            throw error
+        }
+        await controller.shutdown()
+    }
+
+    func testShutdownCancelsStartupAndLeavesNoChildBehind() async throws {
+        let executable = try makeWaitingExecutable()
+        HermesServerURLProtocol.handler = { _ in throw URLError(.cannotConnectToHost) }
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL, apiKey: "test-key",
+            executableOverride: executable.path, session: makeSession(), readinessTimeout: .seconds(30),
+            managedProcessInspector: makeUnoccupiedInspector()
+        )
+        let startup = Task { try await controller.ensureAvailable() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while await controller.processStatus().totalStartCount == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        await controller.shutdown()
+        do {
+            try await startup.value
+            XCTFail("Shutdown should cancel pending readiness")
+        } catch is CancellationError {
+            // Expected, rather than waiting for the thirty-second readiness deadline.
+        }
+        let status = await controller.processStatus()
+        XCTAssertFalse(status.ownedProcessRunning)
+        XCTAssertEqual(status.totalStartCount, 1)
+        XCTAssertEqual(status.unexpectedExitCount, 0)
+    }
+
+    func testShutdownWaitsForOwnedGatewayToExitBeforeReturning() async throws {
+        let executable = try makeWaitingExecutable()
+        HermesServerURLProtocol.handler = { request in
+            if request.url?.path == "/health" { throw URLError(.cannotConnectToHost) }
+            return (Self.response(for: request, status: 200), Self.compatibleCapabilities())
+        }
+        let controller = HermesServerController(
+            baseURL: HermesRuntimeConfiguration.managedBaseURL, apiKey: "test-key",
+            executableOverride: executable.path, session: makeSession(), readinessTimeout: .seconds(2),
+            managedProcessInspector: makeUnoccupiedInspector()
+        )
+        try await controller.ensureAvailable()
+        let pidFile = executable.deletingLastPathComponent().appending(path: "pid")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !FileManager.default.fileExists(atPath: pidFile.path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let pid = try XCTUnwrap(Int32(String(contentsOf: pidFile).trimmingCharacters(in: .whitespacesAndNewlines)))
+        await controller.shutdown()
+        XCTAssertNil(HermesManagedProcessInspector.readProcessIdentity(pid), "Shutdown must finish before quitting the app")
+        let status = await controller.processStatus()
+        XCTAssertFalse(status.ownedProcessRunning)
+        XCTAssertEqual(status.unexpectedExitCount, 0)
+    }
+
+    private func makeWaitingExecutable() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "jarvis-lifecycle-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        temporaryDirectories.append(directory)
+        let executable = directory.appending(path: "hermes")
+        try """
+        #!/bin/sh
+        echo $$ > "${0%/*}/pid"
+        trap 'exit 0' TERM
+        while :; do /bin/sleep 0.05; done
+
+        """.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        return executable
+    }
+
+    private func makeUnoccupiedInspector() -> HermesManagedProcessInspector {
+        HermesManagedProcessInspector(profileDirectory: URL(fileURLWithPath: "/missing/profile"))
+    }
+
+    private func makeInspector(parentPID: Int32 = 1) throws -> HermesManagedProcessInspector {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "jarvis-record-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        temporaryDirectories.append(directory)
+        let data = try JSONSerialization.data(withJSONObject: [
+            "pid": 42, "kind": "hermes-gateway", "start_time": 12345,
+            "hermes_home": directory.path,
+            "argv": ["hermes", "gateway", "run", "--force", "--external-supervisor"],
+        ])
+        try data.write(to: directory.appending(path: "gateway.pid"))
+        var inspector = HermesManagedProcessInspector(profileDirectory: directory)
+        inspector.processIdentity = { _ in
+            HermesManagedProcessIdentity(pid: 42, parentPID: parentPID, userID: getuid(), startTime: 12345)
+        }
+        inspector.listenerPIDs = { _ in [42] }
+        inspector.sendSignal = { _, _ in XCTFail("Unexpected signal to fixture process"); return false }
+        return inspector
     }
 
     func testCustomEndpointRequiresAuthenticatedCompatibleCapabilities() async throws {

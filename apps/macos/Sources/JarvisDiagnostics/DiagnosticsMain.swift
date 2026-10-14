@@ -128,13 +128,22 @@ struct JarvisDiagnostics {
         }
         let controller = HermesServerController(baseURL: config.hermesBaseURL, apiKey: apiKey)
         try await controller.ensureAvailable()
+        let reconnect = HermesServerController(baseURL: config.hermesBaseURL, apiKey: apiKey)
         do {
             let health = try await makeHermesClient(config: config).health()
-            print("autostart=passed health=\(health)")
+            // A new controller has no in-memory ownership of the existing process.
+            try await reconnect.ensureAvailable()
+            let status = await reconnect.processStatus()
+            guard status.totalStartCount == 0 else {
+                throw HermesServerError.managedEndpointOccupied
+            }
+            print("autostart=passed reconnect=passed health=\(health)")
         } catch {
+            await reconnect.shutdown()
             await controller.shutdown()
             throw error
         }
+        await reconnect.shutdown()
         await controller.shutdown()
     }
 

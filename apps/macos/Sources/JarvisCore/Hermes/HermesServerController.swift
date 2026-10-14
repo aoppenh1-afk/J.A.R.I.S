@@ -30,9 +30,15 @@ public actor HermesServerController {
     private let session: URLSession
     private let redirectPolicy = HermesRedirectPolicy()
     private let onUnexpectedExit: ExitHandler?
+    private let managedProcessInspector: HermesManagedProcessInspector
     private var process: Process?
+    private var attachedProcess: HermesManagedProcessIdentity?
+    private var attachedProcessMonitor: Task<Void, Never>?
+    private var availabilityTask: (id: UUID, task: Task<Void, Error>)?
+    private var shutdownTask: Task<Void, Never>?
     private var restartLimiter = RestartRateLimiter(maximumStarts: 3, window: 60)
     private let readinessTimeout: Duration
+    private let shutdownTimeout: Duration
     private var intentionalStops: Set<ObjectIdentifier> = []
     private var totalStartCount = 0
     private var unexpectedExitCount = 0
@@ -46,15 +52,52 @@ public actor HermesServerController {
         readinessTimeout: Duration = .seconds(60),
         onUnexpectedExit: ExitHandler? = nil
     ) {
+        self.init(
+            baseURL: baseURL, apiKey: apiKey, executableOverride: executableOverride,
+            session: session, readinessTimeout: readinessTimeout, onUnexpectedExit: onUnexpectedExit,
+            managedProcessInspector: HermesManagedProcessInspector()
+        )
+    }
+
+    init(
+        baseURL: URL,
+        apiKey: String,
+        executableOverride: String? = nil,
+        session: URLSession = .shared,
+        readinessTimeout: Duration = .seconds(60),
+        shutdownTimeout: Duration = .seconds(5),
+        onUnexpectedExit: ExitHandler? = nil,
+        managedProcessInspector: HermesManagedProcessInspector
+    ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.executableOverride = executableOverride
         self.session = session
         self.readinessTimeout = readinessTimeout
         self.onUnexpectedExit = onUnexpectedExit
+        self.managedProcessInspector = managedProcessInspector
+        self.shutdownTimeout = shutdownTimeout
     }
 
     public func ensureAvailable() async throws {
+        if let shutdownTask { await shutdownTask.value }
+        try Task.checkCancellation()
+        if let availabilityTask {
+            try await availabilityTask.task.value
+            return try Task.checkCancellation()
+        }
+        let id = UUID()
+        let task = Task { try await self.ensureAvailableOnce() }
+        availabilityTask = (id, task)
+        defer {
+            if availabilityTask?.id == id { availabilityTask = nil }
+        }
+        try await task.value
+        try Task.checkCancellation()
+    }
+
+    private func ensureAvailableOnce() async throws {
+        try Task.checkCancellation()
         try HermesRuntimeConfiguration.validateEndpoint(baseURL)
         if let process, !process.isRunning {
             self.process = nil
@@ -71,9 +114,24 @@ public actor HermesServerController {
             }
             return
         }
-        guard !(await endpointResponds()) else {
+        if let existing = managedProcessInspector.verifiedListener(at: baseURL) {
+            if await isAuthenticatedReady(),
+               managedProcessInspector.isSameListener(existing, at: baseURL) {
+                try Task.checkCancellation()
+                attach(to: existing)
+                return
+            }
+            // A previous app may have exited with an older Keychain key. Reclaim only
+            // its verified orphan, after rechecking identity immediately before signaling.
+            guard managedProcessInspector.isSameListener(existing, at: baseURL),
+                  managedProcessInspector.signalOrphan(existing, signal: SIGTERM) else {
+                throw HermesServerError.managedEndpointOccupied
+            }
+            try await waitForOrphanExit(existing)
+        } else if await endpointResponds() {
             throw HermesServerError.managedEndpointOccupied
         }
+        try Task.checkCancellation()
         guard baseURL.scheme == "http",
               let endpointHost = baseURL.host else {
             throw HermesServerError.autoStartRequiresLoopbackHTTP
@@ -88,6 +146,7 @@ public actor HermesServerController {
         guard restartLimiter.recordStartIfAllowed() else {
             throw HermesServerError.restartRateLimited
         }
+        detachAttachedProcess()
 
         let process = Process()
         process.executableURL = executableURL
@@ -124,13 +183,31 @@ public actor HermesServerController {
             try await waitUntilReady(for: process, collector: collector)
             // Readiness can precede a crash. Keep every start in the rolling window.
         } catch {
-            stopOwnedProcess()
+            await stopOwnedProcess()
             throw error
         }
     }
 
-    public func shutdown() {
-        stopOwnedProcess()
+    public func shutdown() async {
+        if let shutdownTask { return await shutdownTask.value }
+        let task = Task { await self.finishShutdown() }
+        shutdownTask = task
+        await task.value
+        shutdownTask = nil
+    }
+
+    private func finishShutdown() async {
+        availabilityTask?.task.cancel()
+        _ = try? await availabilityTask?.task.value
+        availabilityTask = nil
+        detachAttachedProcess()
+        await stopOwnedProcess()
+    }
+
+    private func detachAttachedProcess() {
+        attachedProcessMonitor?.cancel()
+        attachedProcessMonitor = nil
+        attachedProcess = nil
     }
 
     public func processStatus() -> HermesProcessStatus {
@@ -163,6 +240,7 @@ public actor HermesServerController {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: readinessTimeout)
         while clock.now < deadline {
+            try Task.checkCancellation()
             if await isAuthenticatedReady() { return }
             if !launchedProcess.isRunning {
                 if self.process === launchedProcess { self.process = nil }
@@ -280,7 +358,51 @@ public actor HermesServerController {
         return environment
     }
 
-    private func stopOwnedProcess() {
+    private func attach(to identity: HermesManagedProcessIdentity) {
+        guard attachedProcess != identity else { return }
+        attachedProcessMonitor?.cancel()
+        attachedProcess = identity
+        attachedProcessMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                guard let self, await self.checkAttachedProcess(identity) else { return }
+            }
+        }
+    }
+
+    private func checkAttachedProcess(_ identity: HermesManagedProcessIdentity) -> Bool {
+        guard attachedProcess == identity else { return false }
+        guard managedProcessInspector.isSameProcess(identity) else {
+            attachedProcess = nil
+            attachedProcessMonitor = nil
+            unexpectedExitCount += 1
+            onUnexpectedExit?(-1)
+            return false
+        }
+        return true
+    }
+
+    private func waitForOrphanExit(_ identity: HermesManagedProcessIdentity) async throws {
+        let deadline = ContinuousClock.now.advanced(by: shutdownTimeout)
+        while managedProcessInspector.isSameProcess(identity), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        if managedProcessInspector.isSameProcess(identity) {
+            guard managedProcessInspector.signalOrphan(identity, signal: SIGKILL) else {
+                throw HermesServerError.managedEndpointOccupied
+            }
+            let killDeadline = ContinuousClock.now.advanced(by: .seconds(1))
+            while managedProcessInspector.isSameProcess(identity), ContinuousClock.now < killDeadline {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        guard !managedProcessInspector.isSameProcess(identity) else {
+            throw HermesServerError.managedEndpointOccupied
+        }
+        detachAttachedProcess()
+    }
+
+    private func stopOwnedProcess() async {
         guard let process else { return }
         if let pipe = process.standardOutput as? Pipe {
             pipe.fileHandleForReading.readabilityHandler = nil
@@ -288,9 +410,31 @@ public actor HermesServerController {
         currentStderrCollector = nil
         if process.isRunning {
             intentionalStops.insert(ObjectIdentifier(process))
+            let identity = HermesManagedProcessInspector.readProcessIdentity(process.processIdentifier)
             process.terminate()
+            let deadline = ContinuousClock.now.advanced(by: shutdownTimeout)
+            while process.isRunning, ContinuousClock.now < deadline {
+                // Cleanup must finish even when the startup task was cancelled.
+                await Self.cleanupPause()
+            }
+            if process.isRunning, let identity,
+               HermesManagedProcessInspector.readProcessIdentity(identity.pid) == identity {
+                _ = Darwin.kill(identity.pid, SIGKILL)
+            }
+            let killDeadline = ContinuousClock.now.advanced(by: .seconds(1))
+            while process.isRunning, ContinuousClock.now < killDeadline {
+                await Self.cleanupPause()
+            }
         }
-        self.process = nil
+        if self.process === process { self.process = nil }
+    }
+
+    private static func cleanupPause() async {
+        if Task.isCancelled {
+            await Task.detached { try? await Task.sleep(for: .milliseconds(50)) }.value
+        } else {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
     }
 }
 

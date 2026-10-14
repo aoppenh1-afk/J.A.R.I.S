@@ -13,7 +13,9 @@ J.A.R.V.I.S. uses the named Hermes profile `jarvis` at `~/.hermes/profiles/jarvi
 
 The app never runs `hermes profile use jarvis`. Port 8642 remains available to the general/default Hermes gateway. Hermes 0.21.5 refuses a separate named-profile gateway without `--force`; this flag explicitly keeps the app-owned API listener separate. `--external-supervisor` returns restarts to the app instead of leaving a detached gateway process behind.
 
-A listener already present on port 8643 is not accepted as proof of profile identity. The app reports it as occupied and unverified unless the current app instance owns the process. Readiness uses authenticated `/v1/capabilities` and verifies the run, SSE, status, stop, and approval API contract.
+A listener already present on port 8643 is verified against the dedicated profile's `gateway.pid` record. The record must identify a `hermes-gateway` launched with `--external-supervisor`, name the exact profile directory, and match the live process's PID, start time, current OS user, and exclusive TCP listener. Missing, malformed, legacy, mismatched, or ambiguous records fail closed. Readiness also uses authenticated `/v1/capabilities` and verifies the run, SSE, status, stop, and approval API contract.
+
+A verified compatible gateway is reused after an app crash or update and monitored for exit. If it rejects the current key or has an incompatible API, only a verified orphan whose parent is PID 1 can be stopped and relaunched. Identity is rechecked before each signal, with a bounded graceful stop followed by forced termination if needed. A gateway belonging to another live app is never stopped. Shutdown detaches from reused gateways; it cancels pending startup and waits for an owned child to exit. Concurrent startup requests share one launch.
 
 A non-default loopback endpoint is operator-managed. J.A.R.V.I.S. does not auto-launch Hermes there. The endpoint must accept the configured bearer key and expose the compatible API, while the operator remains responsible for ensuring it serves the `jarvis` profile because Hermes's capability payload does not attest named-profile identity.
 
